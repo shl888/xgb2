@@ -11,15 +11,7 @@ import websockets
 import aiohttp
 import time
 
-# 🚨 新增导入 - 合约收集器
-try:
-    from .symbol_collector import add_symbol_from_websocket
-    SYMBOL_COLLECTOR_AVAILABLE = True
-except ImportError:
-    logger = logging.getLogger(__name__)
-    SYMBOL_COLLECTOR_AVAILABLE = False
 
-logger = logging.getLogger(__name__)
 
 # 🚨 新增：明确定义连接类型常量
 class ConnectionType:
@@ -435,19 +427,14 @@ class WebSocketConnection:
             }
             
             try:
-                await self.data_callback(processed)
+                # ✅ 修改：传递三个参数
+                await self.data_callback(processed["exchange"], processed["symbol"], processed)
             except Exception as e:
                 logger.error(f"[{self.connection_id}] 数据回调失败: {e}")
         
         elif event_type == "markPriceUpdate":
             symbol = data.get("s", "").upper()
             
-            # 🚨 新增：收集币安合约名
-            if SYMBOL_COLLECTOR_AVAILABLE:
-                try:
-                    add_symbol_from_websocket("binance", symbol)
-                except Exception as e:
-                    logger.debug(f"收集币安合约失败 {symbol}: {e}")
             
             processed = {
                 "exchange": "binance",
@@ -461,7 +448,8 @@ class WebSocketConnection:
             }
             
             try:
-                await self.data_callback(processed)
+                # ✅ 修改：传递三个参数
+                await self.data_callback(processed["exchange"], processed["symbol"], processed)
             except Exception as e:
                 logger.error(f"[{self.connection_id}] 数据回调失败: {e}")
     
@@ -485,12 +473,6 @@ class WebSocketConnection:
                     funding_data = data["data"][0]
                     processed_symbol = symbol.replace('-USDT-SWAP', 'USDT')
                     
-                    # 🚨 新增：收集OKX合约名
-                    if SYMBOL_COLLECTOR_AVAILABLE:
-                        try:
-                            add_symbol_from_websocket("okx", processed_symbol)
-                        except Exception as e:
-                            logger.debug(f"收集OKX合约失败 {processed_symbol}: {e}")
                     
                     # 🚨 【关键修复】记录哪个连接收到的数据
                     funding_rate = float(funding_data.get("fundingRate", 0))
@@ -507,7 +489,8 @@ class WebSocketConnection:
                         "original_symbol": symbol
                     }
                     try:
-                        await self.data_callback(processed)
+                        # ✅ 修改：传递三个参数
+                        await self.data_callback(processed["exchange"], processed["symbol"], processed)
                     except Exception as e:
                         logger.error(f"[{self.connection_id}] 数据回调失败: {e}")
                     
@@ -538,7 +521,8 @@ class WebSocketConnection:
                         "original_symbol": symbol
                     }
                     try:
-                        await self.data_callback(processed)
+                        # ✅ 修改：传递三个参数
+                        await self.data_callback(processed["exchange"], processed["symbol"], processed)
                     except Exception as e:
                         logger.error(f"[{self.connection_id}] 数据回调失败: {e}")
                     
@@ -579,4 +563,4 @@ class WebSocketConnection:
             "last_message_seconds_ago": last_msg_seconds,
             "reconnect_count": self.reconnect_count,
             "timestamp": now.isoformat()
-    }
+            }
