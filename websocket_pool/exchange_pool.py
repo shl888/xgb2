@@ -197,54 +197,77 @@ class ExchangeWebSocketPool:
             try:
                 # 1. 监控所有主连接状态
                 for i, master_conn in enumerate(self.master_connections):
-                    if not master_conn.connected:
-                        logger.warning(f"[监控调度] 主连接{i} ({master_conn.connection_id}) 断开")
-                        
-                        # 🚨 监控调度决策：是否启动故障转移
-                        await self._monitor_handle_master_failure(i, master_conn)
+                    try:
+                        # 🚨 安全检查连接状态
+                        is_connected = getattr(master_conn, 'connected', False)
+                        if not is_connected:
+                            conn_id = getattr(master_conn, 'connection_id', f'unknown_{i}')
+                            logger.warning(f"[监控调度] 主连接{i} ({conn_id}) 断开")
+                            
+                            # 🚨 监控调度决策
+                            await self._monitor_handle_master_failure(i, master_conn)
+                    except Exception as e:
+                        logger.error(f"[监控调度] 检查主连接状态失败: {e}")
                 
                 # 2. 监控所有温备连接状态
                 for i, warm_conn in enumerate(self.warm_standby_connections):
-                    if not warm_conn.connected:
-                        logger.warning(f"[监控调度] 温备连接{i} ({warm_conn.connection_id}) 断开")
-                        
-                        # 🚨 监控调度决策：重连温备
-                        await warm_conn.connect()
-                        if warm_conn.connected:
-                            logger.info(f"[监控调度] 温备连接{i} 重连成功")
+                    try:
+                        # 🚨 安全检查连接状态
+                        is_connected = getattr(warm_conn, 'connected', False)
+                        if not is_connected:
+                            conn_id = getattr(warm_conn, 'connection_id', f'unknown_{i}')
+                            logger.warning(f"[监控调度] 温备连接{i} ({conn_id}) 断开")
+                            
+                            # 🚨 监控调度决策：重连温备
+                            if hasattr(warm_conn, 'connect'):
+                                await warm_conn.connect()
+                                if getattr(warm_conn, 'connected', False):
+                                    logger.info(f"[监控调度] 温备连接{i} 重连成功")
+                    except Exception as e:
+                        logger.error(f"[监控调度] 检查温备连接状态失败: {e}")
                 
-                # 3. 定期报告状态到共享存储
-                await self._report_status_to_data_store()
+                # 3. 定期报告状态到共享存储（带异常捕获）
+                try:
+                    await self._report_status_to_data_store()
+                except Exception as e:
+                    logger.error(f"[监控调度] 报告状态失败: {e}")
                 
-                await asyncio.sleep(3)  # 每3秒调度一次
+                await asyncio.sleep(3)
                 
             except Exception as e:
                 logger.error(f"[监控调度] 调度循环错误: {e}")
+                import traceback
+                logger.error(traceback.format_exc())  # 🚨 输出完整堆栈
                 await asyncio.sleep(3)
     
     async def _select_best_standby_from_pool(self):
         """🚨 从共享池选择最佳温备"""
         available_standbys = [
             conn for conn in self.warm_standby_connections 
-            if conn.connected and not conn.is_active
+            if getattr(conn, 'connected', False) and not getattr(conn, 'is_active', True)
         ]
         
         if not available_standbys:
             logger.warning(f"[监控调度] 温备池中没有可用连接")
             return None
         
-        # 🚨 选择策略：最健康（最近有消息、重连次数少、订阅数少）
-        selected_standby = min(
-            available_standbys,
-            key=lambda conn: (
-                conn.last_message_seconds_ago or 999,  # 消息越新越好
-                conn.reconnect_count,                   # 重连次数越少越好
-                len(conn.symbols)                       # 当前负担越轻越好
+        try:
+            # 🚨 选择策略：最健康（最近有消息、重连次数少、订阅数少）
+            selected_standby = min(
+                available_standbys,
+                key=lambda conn: (
+                    getattr(conn, 'last_message_seconds_ago', 999),  # 消息越新越好
+                    getattr(conn, 'reconnect_count', 999),           # 重连次数越少越好
+                    len(getattr(conn, 'symbols', []))               # 当前负担越轻越好
+                )
             )
-        )
-        
-        logger.info(f"[监控调度] 从池中选择最佳温备: {selected_standby.connection_id}")
-        return selected_standby
+            
+            logger.info(f"[监控调度] 从池中选择最佳温备: {getattr(selected_standby, 'connection_id', 'unknown')}")
+            return selected_standby
+            
+        except Exception as e:
+            logger.error(f"[监控调度] 选择最佳温备失败: {e}")
+            return available_standbys[0] if available_standbys else None
     
     async def _monitor_handle_master_failure(self, master_index: int, failed_master):
         """🚨 监控处理主连接故障 - 调度决策（共享池版）"""
@@ -255,7 +278,8 @@ class ExchangeWebSocketPool:
         
         if not standby_conn:
             logger.warning(f"[监控调度] 没有可用的温备连接，尝试重连主连接")
-            await failed_master.connect()
+            if hasattr(failed_master, 'connect'):
+                await failed_master.connect()
             return
         
         # 🚨 监控决策：执行故障转移
@@ -264,21 +288,27 @@ class ExchangeWebSocketPool:
         
         if not success:
             logger.warning(f"[监控调度] 故障转移失败，尝试重连原主连接")
-            await failed_master.connect()
+            if hasattr(failed_master, 'connect'):
+                await failed_master.connect()
     
     async def _monitor_execute_failover(self, master_index: int, old_master, new_master):
         """🚨 监控执行故障转移 - 权力正式交接（共享池版）"""
-        logger.info(f"[监控调度] 🚨 开始故障转移: {old_master.connection_id} -> {new_master.connection_id}")
+        old_conn_id = getattr(old_master, 'connection_id', f'old_master_{master_index}')
+        new_conn_id = getattr(new_master, 'connection_id', 'new_master')
+        
+        logger.info(f"[监控调度] 🚨 开始故障转移: {old_conn_id} -> {new_conn_id}")
         
         try:
             # 1. 🚨 监控命令：原主连接准备降级
             logger.info(f"[监控调度] 步骤1: 原主连接准备降级")
-            if old_master.connected and old_master.subscribed:
+            if getattr(old_master, 'connected', False) and getattr(old_master, 'subscribed', False):
                 logger.info(f"[监控调度] 命令原主连接取消订阅")
-                await old_master._unsubscribe()
+                if hasattr(old_master, '_unsubscribe'):
+                    await old_master._unsubscribe()
             
             # 🚨 关键：清空原主连接的合约列表，防止重连后重复订阅
-            old_master.symbols = []
+            if hasattr(old_master, 'symbols'):
+                old_master.symbols = []
             
             # 2. 🚨 监控命令：温备连接升级为主
             logger.info(f"[监控调度] 步骤2: 温备连接升级为主")
@@ -286,10 +316,11 @@ class ExchangeWebSocketPool:
             # 获取该主连接应该负责的合约组
             master_symbols = self.symbol_groups[master_index] if master_index < len(self.symbol_groups) else []
             
-            success = await new_master.switch_role(ConnectionType.MASTER, master_symbols)
-            if not success:
-                logger.error("[监控调度] 温备切换角色失败")
-                return False
+            if hasattr(new_master, 'switch_role'):
+                success = await new_master.switch_role(ConnectionType.MASTER, master_symbols)
+                if not success:
+                    logger.error("[监控调度] 温备切换角色失败")
+                    return False
             
             # 3. 🚨 监控更新：连接池权力结构（共享池逻辑）
             logger.info(f"[监控调度] 步骤3: 更新连接池权力结构（共享池）")
@@ -299,17 +330,20 @@ class ExchangeWebSocketPool:
                 self.warm_standby_connections.remove(new_master)
             
             # 更新主连接列表
-            self.master_connections[master_index] = new_master
+            if master_index < len(self.master_connections):
+                self.master_connections[master_index] = new_master
             
             # 4. 🚨 监控命令：原主连接重连为温备并加入共享池
             logger.info(f"[监控调度] 步骤4: 原主连接重连为温备并加入共享池")
-            await old_master.disconnect()
+            if hasattr(old_master, 'disconnect'):
+                await old_master.disconnect()
             await asyncio.sleep(1)  # 等待断开完成
             
-            if await old_master.connect():
+            if hasattr(old_master, 'connect') and await old_master.connect():
                 # 🚨 监控设置：只给心跳合约，不给主合约
                 heartbeat_symbols = self._get_heartbeat_symbols()
-                await old_master.switch_role(ConnectionType.WARM_STANDBY, heartbeat_symbols)
+                if hasattr(old_master, 'switch_role'):
+                    await old_master.switch_role(ConnectionType.WARM_STANDBY, heartbeat_symbols)
                 
                 # 🚨 将旧主加入温备共享池
                 if old_master not in self.warm_standby_connections:
@@ -319,11 +353,11 @@ class ExchangeWebSocketPool:
             
             # 5. 🚨 监控记录：故障转移完成
             logger.info(f"[监控调度] ✅ 故障转移完成（共享池模式）")
-            logger.info(f"[监控调度] 📊 新主连接: {new_master.connection_id} (合约: {len(master_symbols)}个)")
-            logger.info(f"[监控调度] 📊 温备池连接: {[conn.connection_id for conn in self.warm_standby_connections]}")
+            logger.info(f"[监控调度] 📊 新主连接: {new_conn_id} (合约: {len(master_symbols)}个)")
+            logger.info(f"[监控调度] 📊 温备池连接: {[getattr(conn, 'connection_id', 'unknown') for conn in self.warm_standby_connections]}")
             
             # 6. 🚨 监控报告：更新状态到共享存储
-            await self._report_failover_to_data_store(master_index, old_master.connection_id, new_master.connection_id)
+            await self._report_failover_to_data_store(master_index, old_conn_id, new_conn_id)
             
             return True
             
@@ -334,7 +368,7 @@ class ExchangeWebSocketPool:
             return False
     
     async def _report_status_to_data_store(self):
-        """报告状态到共享存储"""
+        """报告状态到共享存储 - 安全版"""
         try:
             status_report = {
                 "exchange": self.exchange,
@@ -342,23 +376,39 @@ class ExchangeWebSocketPool:
                 "masters": [],
                 "warm_standbys": [],
                 "monitor": None,
-                "pool_mode": "shared_pool"  # 🚨 新增：标记为共享池模式
+                "pool_mode": "shared_pool"
             }
             
-            # 报告主连接状态
+            # 🚨 安全报告主连接状态
             for conn in self.master_connections:
-                status = await conn.check_health()
-                status_report["masters"].append(status)
+                try:
+                    if hasattr(conn, 'check_health'):
+                        status = await conn.check_health()
+                        status_report["masters"].append(status)
+                    else:
+                        logger.warning(f"[监控调度] 主连接缺少check_health方法: {conn}")
+                except Exception as e:
+                    logger.error(f"[监控调度] 获取主连接状态失败: {e}")
             
-            # 报告温备连接状态
+            # 🚨 安全报告温备连接状态
             for conn in self.warm_standby_connections:
-                status = await conn.check_health()
-                status_report["warm_standbys"].append(status)
+                try:
+                    if hasattr(conn, 'check_health'):
+                        status = await conn.check_health()
+                        status_report["warm_standbys"].append(status)
+                    else:
+                        logger.warning(f"[监控调度] 温备连接缺少check_health方法: {conn}")
+                except Exception as e:
+                    logger.error(f"[监控调度] 获取温备连接状态失败: {e}")
             
-            # 报告监控连接状态
+            # 🚨 安全报告监控连接状态
             if self.monitor_connection:
-                status = await self.monitor_connection.check_health()
-                status_report["monitor"] = status
+                try:
+                    if hasattr(self.monitor_connection, 'check_health'):
+                        status = await self.monitor_connection.check_health()
+                        status_report["monitor"] = status
+                except Exception as e:
+                    logger.error(f"[监控调度] 获取监控连接状态失败: {e}")
             
             await data_store.update_connection_status(
                 self.exchange, 
@@ -399,8 +449,8 @@ class ExchangeWebSocketPool:
         while True:
             try:
                 # 简单健康检查，只记录状态
-                masters_connected = sum(1 for c in self.master_connections if c.connected)
-                warm_connected = sum(1 for c in self.warm_standby_connections if c.connected)
+                masters_connected = sum(1 for c in self.master_connections if getattr(c, 'connected', False))
+                warm_connected = sum(1 for c in self.warm_standby_connections if getattr(c, 'connected', False))
                 
                 if masters_connected < len(self.master_connections):
                     logger.info(f"[健康检查] {self.exchange}: {masters_connected}/{len(self.master_connections)} 个主连接活跃")
@@ -431,10 +481,12 @@ class ExchangeWebSocketPool:
         # 断开所有连接
         tasks = []
         for conn in self.master_connections:
-            tasks.append(conn.disconnect())
+            if hasattr(conn, 'disconnect'):
+                tasks.append(conn.disconnect())
         for conn in self.warm_standby_connections:
-            tasks.append(conn.disconnect())
-        if self.monitor_connection:
+            if hasattr(conn, 'disconnect'):
+                tasks.append(conn.disconnect())
+        if self.monitor_connection and hasattr(self.monitor_connection, 'disconnect'):
             tasks.append(self.monitor_connection.disconnect())
         
         if tasks:
