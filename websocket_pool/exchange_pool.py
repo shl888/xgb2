@@ -1,6 +1,6 @@
 """
 单个交易所的连接池管理 - 监控调度版
-修复：并发初始化 + 强制后置检查 + 完整日志恢复
+监控连接负责调度管理主备切换
 """
 import asyncio
 import logging
@@ -26,37 +26,38 @@ class ExchangeWebSocketPool:
     
     def __init__(self, exchange: str, data_callback=None):
         self.exchange = exchange
-        # 使用传入的回调，如果没有则创建默认回调
+        # ✅【关键修改】使用传入的回调，如果没有则创建默认回调
         if data_callback:
             self.data_callback = data_callback
         else:
+            # 创建默认回调，直接对接共享数据模块
             self.data_callback = self._create_default_callback()
             
         self.config = EXCHANGE_CONFIGS.get(exchange, {})
         
         # 连接池
-        self.master_connections = []
-        self.warm_standby_connections = []
-        self.monitor_connection = None
+        self.master_connections = []  # 主连接
+        self.warm_standby_connections = []  # 温备连接（共享池）
+        self.monitor_connection = None  # 监控连接（调度中心）
         
         # 状态
-        self.symbols = []
-        self.symbol_groups = []
+        self.symbols = []  # 所有合约
+        self.symbol_groups = []  # 分组后的合约列表
         
-        # 任务
+        # 任务 - 🚨 简化：只保留必要的健康检查
         self.health_check_task = None
-        self.monitor_scheduler_task = None
-        
-        logger.info(f"[{self.exchange}] ExchangeWebSocketPool 初始化完成")
-
+        self.monitor_scheduler_task = None  # 🚨 新增：监控调度任务
+    
     def _create_default_callback(self):
         """创建默认回调函数，直接对接共享数据模块"""
         async def default_callback(data):
+            """默认数据回调 - 直接存入共享存储"""
             try:
                 if "exchange" not in data or "symbol" not in data:
                     logger.warning(f"[{self.exchange}] 数据缺少必要字段: {data}")
                     return
                     
+                # ✅【关键修改】直接调用 data_store.update_market_data
                 await data_store.update_market_data(
                     data["exchange"],
                     data["symbol"],
@@ -69,10 +70,9 @@ class ExchangeWebSocketPool:
         return default_callback
         
     async def initialize(self, symbols: List[str]):
-        """🚀 并发初始化 + 完整日志恢复"""
+        """🚀 并发初始化 + 恢复详细日志"""
         self.symbols = symbols
         
-        # 🚨 恢复原始详细日志
         symbols_per_master = self.config.get("symbols_per_master", 300)
         self.symbol_groups = [
             symbols[i:i + symbols_per_master]
@@ -83,56 +83,32 @@ class ExchangeWebSocketPool:
         if len(self.symbol_groups) > masters_count:
             self._balance_symbol_groups(masters_count)
         
-        # 🚨 恢复原始关键日志（显示分组详情）
-        logger.info(f"[{self.exchange}] 初始化连接池，共 {len(symbols)} 个合约，分为 {len(self.symbol_groups)} 组")
+        # 🎯 恢复原始关键日志（显示分组详情）
+        logger.info(f"[{self.exchange}] 开始初始化连接池")
+        logger.info(f"[{self.exchange}] 📊 合约统计: 共 {len(symbols)} 个，分为 {len(self.symbol_groups)} 组")
         
-        # 🚀 并发执行所有初始化任务
-        init_tasks = [
-            ("主连接", self._initialize_masters()),
-            ("温备连接", self._initialize_warm_standbys()),
-            ("监控调度器", self._initialize_monitor_scheduler()),
-        ]
+        # 依次初始化（非并发，保证日志清晰）
+        logger.info(f"[{self.exchange}] ▶️ 步骤1: 初始化主连接...")
+        await self._initialize_masters()
+        logger.info(f"[{self.exchange}] ✅ 主连接初始化完成: {len(self.master_connections)} 个")  # 🎯 明确的交易所级日志
         
-        # 🚨 为每个任务添加开始日志
-        for name, _ in init_tasks:
-            logger.info(f"[{self.exchange}] 开始初始化 {name}...")
+        logger.info(f"[{self.exchange}] ▶️ 步骤2: 初始化温备连接...")
+        await self._initialize_warm_standbys()
+        logger.info(f"[{self.exchange}] ✅ 温备连接初始化完成: {len(self.warm_standby_connections)} 个")  # 🎯 每个交易所独立输出
         
-        results = await asyncio.gather(
-            *[task[1] for task in init_tasks], 
-            return_exceptions=True
-        )
+        logger.info(f"[{self.exchange}] ▶️ 步骤3: 初始化监控调度器...")
+        await self._initialize_monitor_scheduler()
+        logger.info(f"[{self.exchange}] ✅ 监控调度器初始化完成")
         
-        # 🚨 为每个任务添加完成日志
-        for (name, _), result in zip(init_tasks, results):
-            if isinstance(result, Exception):
-                logger.error(f"[{self.exchange}] ❌ {name}初始化失败: {result}")
-            else:
-                logger.info(f"[{self.exchange}] ✅ {name}初始化完成")
-        
-        # 🚨 强制后置检查：确保监控调度器必须运行
+        # 强制后置检查
         await self._enforce_monitor_scheduler()
         
         # 启动健康检查
         self.health_check_task = asyncio.create_task(self._health_check_loop())
-        logger.info(f"[{self.exchange}] 健康检查已启动")
+        logger.info(f"[{self.exchange}] ✅ 健康检查已启动")
         
-        logger.info(f"[{self.exchange}] 连接池初始化全部完成！")
+        logger.info(f"[{self.exchange}] 🎉 连接池初始化全部完成！")
     
-    async def _enforce_monitor_scheduler(self):
-        """强制确保监控调度器运行"""
-        # 检查监控连接是否存在且正常
-        if not self.monitor_connection or not self.monitor_connection.connected:
-            logger.warning(f"[{self.exchange}] ⚠️ 监控连接异常，尝试紧急恢复...")
-            await self._initialize_monitor_scheduler()
-        
-        # 检查调度循环是否运行
-        if not self.monitor_scheduler_task or self.monitor_scheduler_task.done():
-            logger.warning(f"[{self.exchange}] ⚠️ 调度循环未运行，强制启动...")
-            self.monitor_scheduler_task = asyncio.create_task(
-                self._monitor_scheduling_loop()
-            )
-            logger.info(f"[{self.exchange}_monitor] 🚀 监控调度循环已强制启动")
-
     def _balance_symbol_groups(self, target_groups: int):
         """平衡合约分组"""
         avg_size = len(self.symbols) // target_groups
@@ -150,10 +126,9 @@ class ExchangeWebSocketPool:
         logger.info(f"[{self.exchange}] 合约重新平衡为 {len(self.symbol_groups)} 组")
     
     async def _initialize_masters(self):
-        """初始化主连接 - 恢复详细日志"""
+        """初始化主连接"""
         ws_url = self.config.get("ws_public_url")
         
-        # 🚨 恢复原始日志：显示分组详情
         for i, symbol_group in enumerate(self.symbol_groups):
             conn_id = f"{self.exchange}_master_{i}"
             connection = WebSocketConnection(
@@ -165,23 +140,17 @@ class ExchangeWebSocketPool:
                 symbols=symbol_group
             )
             
-            # 🚨 恢复原始日志：显示每个主连接的合约数
-            logger.info(f"[{conn_id}] 主连接启动，订阅 {len(symbol_group)} 个合约")
-            
-            try:
-                success = await asyncio.wait_for(connection.connect(), timeout=30)
-                if success:
-                    self.master_connections.append(connection)
-                    logger.info(f"[{conn_id}] 主连接启动成功")
-                else:
-                    logger.error(f"[{conn_id}] 主连接启动失败")
-            except Exception as e:
-                logger.error(f"[{conn_id}] 主连接异常: {e}")
+            success = await connection.connect()
+            if success:
+                self.master_connections.append(connection)
+                logger.info(f"[{conn_id}] 主连接启动成功，订阅 {len(symbol_group)} 个合约")
+            else:
+                logger.error(f"[{conn_id}] 主连接启动失败")
         
         logger.info(f"[{self.exchange}] 主连接初始化完成: {len(self.master_connections)} 个")
     
     async def _initialize_warm_standbys(self):
-        """初始化温备连接 - 恢复详细日志"""
+        """初始化温备连接"""
         ws_url = self.config.get("ws_public_url")
         warm_standbys_count = self.config.get("warm_standbys_count", 3)
         
@@ -198,19 +167,12 @@ class ExchangeWebSocketPool:
                 symbols=heartbeat_symbols
             )
             
-            logger.info(f"[{conn_id}] 温备连接启动（将延迟订阅心跳）")
-            
-            try:
-                success = await asyncio.wait_for(connection.connect(), timeout=30)
-                if success:
-                    self.warm_standby_connections.append(connection)
-                    logger.info(f"[{conn_id}] 温备连接启动成功")
-                else:
-                    logger.error(f"[{conn_id}] 温备连接启动失败")
-            except asyncio.TimeoutError:
-                logger.error(f"[{conn_id}] 温备连接超时30秒，强制跳过")
-            except Exception as e:
-                logger.error(f"[{conn_id}] 温备连接异常: {e}")
+            success = await connection.connect()
+            if success:
+                self.warm_standby_connections.append(connection)
+                logger.info(f"[{conn_id}] 温备连接启动成功（将延迟订阅心跳）")
+            else:
+                logger.error(f"[{conn_id}] 温备连接启动失败")
         
         logger.info(f"[{self.exchange}] 温备连接初始化完成: {len(self.warm_standby_connections)} 个")
     
@@ -223,173 +185,185 @@ class ExchangeWebSocketPool:
         return []
     
     async def _initialize_monitor_scheduler(self):
-        """初始化监控调度器 - 恢复详细日志"""
+        """🚨 初始化监控连接 - 作为调度中心"""
         ws_url = self.config.get("ws_public_url")
         
-        if not self.config.get("monitor_enabled", True):
-            logger.warning(f"[{self.exchange}] 监控调度器被配置禁用")
-            return
-        
-        if not ws_url:
-            logger.error(f"[{self.exchange}] WebSocket URL配置缺失")
-            return
-        
         conn_id = f"{self.exchange}_monitor"
-        max_retries = 3
+        self.monitor_connection = WebSocketConnection(
+            exchange=self.exchange,
+            ws_url=ws_url,
+            connection_id=conn_id,
+            connection_type=ConnectionType.MONITOR,
+            data_callback=self.data_callback,
+            symbols=[]  # 调度器不订阅数据
+        )
         
-        for attempt in range(1, max_retries + 1):
-            try:
-                logger.info(f"[{conn_id}] 正在建立监控连接（第{attempt}次）")
-                
-                self.monitor_connection = WebSocketConnection(
-                    exchange=self.exchange,
-                    ws_url=ws_url,
-                    connection_id=conn_id,
-                    connection_type=ConnectionType.MONITOR,
-                    data_callback=self.data_callback,
-                    symbols=[]
-                )
-                
-                success = await asyncio.wait_for(self.monitor_connection.connect(), timeout=30)
-                
-                if success:
-                    logger.info(f"[{conn_id}] 监控连接建立成功")
-                    
-                    self.monitor_scheduler_task = asyncio.create_task(
-                        self._monitor_scheduling_loop()
-                    )
-                    logger.info(f"[{conn_id}] 监控调度循环已启动")
-                    return True
-                    
-            except asyncio.TimeoutError:
-                logger.error(f"[{conn_id}] 监控连接超时（{attempt}/{max_retries}）")
-            except Exception as e:
-                logger.error(f"[{conn_id}] 监控连接异常（{attempt}/{max_retries}）: {e}")
+        success = await self.monitor_connection.connect()
+        if success:
+            logger.info(f"[{conn_id}] 监控调度器启动成功")
             
-            if attempt < max_retries:
-                await asyncio.sleep(2 ** attempt)
+            # 🚨 关键：启动监控调度循环（接管故障转移职责）
+            self.monitor_scheduler_task = asyncio.create_task(
+                self._monitor_scheduling_loop()
+            )
+            logger.info(f"[{conn_id}] 监控调度循环已启动")
+        else:
+            logger.error(f"[{conn_id}] 监控调度器启动失败")
+    
+    async def _enforce_monitor_scheduler(self):
+        """强制后置检查：确保监控调度器已启动"""
+        if not self.monitor_connection or not self.monitor_connection.connected:
+            logger.error(f"[{self.exchange}] 🚨 监控调度器未启动！尝试重启...")
+            await self._initialize_monitor_scheduler()
         
-        logger.error(f"[{conn_id}] 监控调度器在{max_retries}次尝试后仍失败")
-        return False
+        if not self.monitor_scheduler_task or self.monitor_scheduler_task.done():
+            logger.error(f"[{self.exchange}] 🚨 监控调度循环未运行！尝试重启...")
+            self.monitor_scheduler_task = asyncio.create_task(
+                self._monitor_scheduling_loop()
+            )
     
     async def _monitor_scheduling_loop(self):
-        """监控调度循环 - 真正的权力中心"""
-        logger.info(f"[{self.exchange}_monitor] 开始监控调度循环，每3秒检查一次")
+        """🚨 监控调度循环 - 真正的权力中心"""
+        logger.info(f"[{self.exchange}] [监控调度] 开始监控调度循环，每3秒检查一次")
         
         while True:
             try:
                 # 1. 监控所有主连接状态
                 for i, master_conn in enumerate(self.master_connections):
                     if not master_conn.connected:
-                        logger.warning(f"[监控调度] [{self.exchange}] 主连接{i} ({master_conn.connection_id}) 断开")
+                        logger.warning(f"[{self.exchange}] [监控调度] 主连接{i} ({master_conn.connection_id}) 断开")
+                        
+                        # 🚨 监控调度决策：是否启动故障转移
                         await self._monitor_handle_master_failure(i, master_conn)
                 
                 # 2. 监控所有温备连接状态
                 for i, warm_conn in enumerate(self.warm_standby_connections):
                     if not warm_conn.connected:
-                        logger.warning(f"[监控调度] [{self.exchange}] 温备连接{i} ({warm_conn.connection_id}) 断开")
+                        logger.warning(f"[{self.exchange}] [监控调度] 温备连接{i} ({warm_conn.connection_id}) 断开")
+                        
+                        # 🚨 监控调度决策：重连温备
                         await warm_conn.connect()
                         if warm_conn.connected:
-                            logger.info(f"[监控调度] [{self.exchange}] 温备连接{i} 重连成功")
+                            logger.info(f"[{self.exchange}] [监控调度] 温备连接{i} 重连成功")
                 
-                # 3. 定期报告状态
+                # 3. 定期报告状态到共享存储
                 await self._report_status_to_data_store()
                 
-                await asyncio.sleep(3)
+                await asyncio.sleep(3)  # 每3秒调度一次
                 
             except Exception as e:
-                logger.error(f"[监控调度] [{self.exchange}] 调度循环错误: {e}")
+                logger.error(f"[{self.exchange}] [监控调度] 调度循环错误: {e}")
                 await asyncio.sleep(3)
     
-    async def _monitor_handle_master_failure(self, master_index: int, failed_master):
-        """监控处理主连接故障"""
-        logger.info(f"[监控调度] [{self.exchange}] 处理主连接{master_index}故障")
-        
-        standby_conn = await self._select_best_standby_from_pool()
-        
-        if not standby_conn:
-            logger.warning(f"[监控调度] [{self.exchange}] 无可用温备，尝试重连原主连接")
-            await failed_master.connect()
-            return
-        
-        logger.info(f"[监控调度] [{self.exchange}] 决策：执行故障转移")
-        success = await self._monitor_execute_failover(master_index, failed_master, standby_conn)
-        
-        if not success:
-            logger.warning(f"[监控调度] [{self.exchange}] 故障转移失败，重连原主连接")
-            await failed_master.connect()
-    
     async def _select_best_standby_from_pool(self):
-        """从共享池选择最佳温备"""
+        """🚨 从共享池选择最佳温备"""
         available_standbys = [
             conn for conn in self.warm_standby_connections 
             if conn.connected and not conn.is_active
         ]
         
         if not available_standbys:
-            logger.warning(f"[监控调度] [{self.exchange}] 温备池无可用连接")
+            logger.warning(f"[{self.exchange}] [监控调度] 温备池中没有可用连接")
             return None
         
+        # 🚨 选择策略：最健康（最近有消息、重连次数少、订阅数少）
         selected_standby = min(
             available_standbys,
             key=lambda conn: (
-                conn.last_message_seconds_ago or 999,
-                conn.reconnect_count,
-                len(conn.symbols)
+                conn.last_message_seconds_ago or 999,  # 消息越新越好
+                conn.reconnect_count,                   # 重连次数越少越好
+                len(conn.symbols)                       # 当前负担越轻越好
             )
         )
         
-        logger.info(f"[监控调度] [{self.exchange}] 选择最佳温备: {selected_standby.connection_id}")
+        logger.info(f"[{self.exchange}] [监控调度] 从池中选择最佳温备: {selected_standby.connection_id}")
         return selected_standby
     
+    async def _monitor_handle_master_failure(self, master_index: int, failed_master):
+        """🚨 监控处理主连接故障 - 调度决策（共享池版）"""
+        logger.info(f"[{self.exchange}] [监控调度] 处理主连接{master_index}故障")
+        
+        # 🚨 【关键修改】从共享池选择最佳温备
+        standby_conn = await self._select_best_standby_from_pool()
+        
+        if not standby_conn:
+            logger.warning(f"[{self.exchange}] [监控调度] 没有可用的温备连接，尝试重连主连接")
+            await failed_master.connect()
+            return
+        
+        # 🚨 监控决策：执行故障转移
+        logger.info(f"[{self.exchange}] [监控调度] 🚨 决策：执行故障转移")
+        success = await self._monitor_execute_failover(master_index, failed_master, standby_conn)
+        
+        if not success:
+            logger.warning(f"[{self.exchange}] [监控调度] 故障转移失败，尝试重连原主连接")
+            await failed_master.connect()
+    
     async def _monitor_execute_failover(self, master_index: int, old_master, new_master):
-        """监控执行故障转移"""
-        logger.info(f"[监控调度] [{self.exchange}] 故障转移: {old_master.connection_id} -> {new_master.connection_id}")
+        """🚨 监控执行故障转移 - 权力正式交接（共享池版）"""
+        logger.info(f"[{self.exchange}] [监控调度] 🚨 开始故障转移: {old_master.connection_id} -> {new_master.connection_id}")
         
         try:
-            # 1. 原主连接降级
-            logger.info(f"[监控调度] [{self.exchange}] 步骤1: 原主连接取消订阅")
+            # 1. 🚨 监控命令：原主连接准备降级
+            logger.info(f"[{self.exchange}] [监控调度] 步骤1: 原主连接准备降级")
             if old_master.connected and old_master.subscribed:
+                logger.info(f"[{self.exchange}] [监控调度] 命令原主连接取消订阅")
                 await old_master._unsubscribe()
             
+            # 🚨 关键：清空原主连接的合约列表，防止重连后重复订阅
             old_master.symbols = []
             
-            # 2. 温备升级为主
-            logger.info(f"[监控调度] [{self.exchange}] 步骤2: 温备升级为主")
+            # 2. 🚨 监控命令：温备连接升级为主
+            logger.info(f"[{self.exchange}] [监控调度] 步骤2: 温备连接升级为主")
+            
+            # 获取该主连接应该负责的合约组
             master_symbols = self.symbol_groups[master_index] if master_index < len(self.symbol_groups) else []
             
             success = await new_master.switch_role(ConnectionType.MASTER, master_symbols)
             if not success:
-                logger.error(f"[监控调度] [{self.exchange}] 温备切换角色失败")
+                logger.error(f"[{self.exchange}] [监控调度] 温备切换角色失败")
                 return False
             
-            # 3. 更新连接池结构
+            # 3. 🚨 监控更新：连接池权力结构（共享池逻辑）
+            logger.info(f"[{self.exchange}] [监控调度] 步骤3: 更新连接池权力结构（共享池）")
+            
+            # 🚨 【关键修改】不按索引交换，而是从池中移除新主，添加旧主到池
             if new_master in self.warm_standby_connections:
                 self.warm_standby_connections.remove(new_master)
             
+            # 更新主连接列表
             self.master_connections[master_index] = new_master
             
-            # 4. 原主连接重连为温备
-            logger.info(f"[监控调度] [{self.exchange}] 步骤3: 原主连接重连为温备")
+            # 4. 🚨 监控命令：原主连接重连为温备并加入共享池
+            logger.info(f"[{self.exchange}] [监控调度] 步骤4: 原主连接重连为温备并加入共享池")
             await old_master.disconnect()
-            await asyncio.sleep(1)
+            await asyncio.sleep(1)  # 等待断开完成
             
             if await old_master.connect():
+                # 🚨 监控设置：只给心跳合约，不给主合约
                 heartbeat_symbols = self._get_heartbeat_symbols()
                 await old_master.switch_role(ConnectionType.WARM_STANDBY, heartbeat_symbols)
                 
+                # 🚨 将旧主加入温备共享池
                 if old_master not in self.warm_standby_connections:
                     self.warm_standby_connections.append(old_master)
                 
-                logger.info(f"[监控调度] [{self.exchange}] 原主连接已降级为温备")
+                logger.info(f"[{self.exchange}] [监控调度] 原主连接已降级为温备，订阅心跳合约并加入共享池")
             
-            logger.info(f"[监控调度] [{self.exchange}] 故障转移完成")
+            # 5. 🚨 监控记录：故障转移完成
+            logger.info(f"[{self.exchange}] [监控调度] ✅ 故障转移完成（共享池模式）")
+            logger.info(f"[{self.exchange}] [监控调度] 📊 新主连接: {new_master.connection_id} (合约: {len(master_symbols)}个)")
+            logger.info(f"[{self.exchange}] [监控调度] 📊 温备池连接: {[conn.connection_id for conn in self.warm_standby_connections]}")
+            
+            # 6. 🚨 监控报告：更新状态到共享存储
             await self._report_failover_to_data_store(master_index, old_master.connection_id, new_master.connection_id)
             
             return True
             
         except Exception as e:
-            logger.error(f"[监控调度] [{self.exchange}] 故障转移执行失败: {e}")
+            logger.error(f"[{self.exchange}] [监控调度] 故障转移执行失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False
     
     async def _report_status_to_data_store(self):
@@ -401,17 +375,23 @@ class ExchangeWebSocketPool:
                 "masters": [],
                 "warm_standbys": [],
                 "monitor": None,
-                "pool_mode": "shared_pool"
+                "pool_mode": "shared_pool"  # 🚨 新增：标记为共享池模式
             }
             
+            # 报告主连接状态
             for conn in self.master_connections:
-                status_report["masters"].append(await conn.check_health())
+                status = await conn.check_health()
+                status_report["masters"].append(status)
             
+            # 报告温备连接状态
             for conn in self.warm_standby_connections:
-                status_report["warm_standbys"].append(await conn.check_health())
+                status = await conn.check_health()
+                status_report["warm_standbys"].append(status)
             
+            # 报告监控连接状态
             if self.monitor_connection:
-                status_report["monitor"] = await self.monitor_connection.check_health()
+                status = await self.monitor_connection.check_health()
+                status_report["monitor"] = status
             
             await data_store.update_connection_status(
                 self.exchange, 
@@ -432,37 +412,39 @@ class ExchangeWebSocketPool:
                 "new_master": new_master_id,
                 "timestamp": datetime.now().isoformat(),
                 "type": "failover",
-                "pool_mode": "shared_pool"
+                "pool_mode": "shared_pool"  # 🚨 新增：标记共享池模式
             }
             
+            # 可以存储在专门的位置或添加到状态中
             await data_store.update_connection_status(
                 self.exchange,
                 "failover_history",
                 failover_record
             )
             
-            logger.info(f"[监控调度] [{self.exchange}] 故障转移记录已保存")
+            logger.info(f"[{self.exchange}] [监控调度] 故障转移记录已保存")
             
         except Exception as e:
-            logger.error(f"[监控调度] [{self.exchange}] 保存故障转移记录失败: {e}")
+            logger.error(f"[{self.exchange}] [监控调度] 保存故障转移记录失败: {e}")
     
     async def _health_check_loop(self):
-        """健康检查循环"""
+        """健康检查循环 - 只检查，不行动"""
         while True:
             try:
+                # 简单健康检查，只记录状态
                 masters_connected = sum(1 for c in self.master_connections if c.connected)
                 warm_connected = sum(1 for c in self.warm_standby_connections if c.connected)
                 
                 if masters_connected < len(self.master_connections):
-                    logger.info(f"[健康检查] [{self.exchange}] {masters_connected}/{len(self.master_connections)} 个主连接活跃")
+                    logger.info(f"[{self.exchange}] [健康检查] {masters_connected}/{len(self.master_connections)} 个主连接活跃")
                 
                 if warm_connected < len(self.warm_standby_connections):
-                    logger.info(f"[健康检查] [{self.exchange}] {warm_connected}/{len(self.warm_standby_connections)} 个温备连接活跃")
+                    logger.info(f"[{self.exchange}] [健康检查] {warm_connected}/{len(self.warm_standby_connections)} 个温备连接活跃")
                 
-                await asyncio.sleep(30)
+                await asyncio.sleep(30)  # 每30秒检查一次
                 
             except Exception as e:
-                logger.error(f"[健康检查] [{self.exchange}] 错误: {e}")
+                logger.error(f"[{self.exchange}] [健康检查] 错误: {e}")
                 await asyncio.sleep(30)
     
     async def get_status(self) -> Dict[str, Any]:
@@ -473,11 +455,13 @@ class ExchangeWebSocketPool:
         """关闭连接池"""
         logger.info(f"[{self.exchange}] 正在关闭连接池...")
         
+        # 取消任务
         if self.health_check_task:
             self.health_check_task.cancel()
         if self.monitor_scheduler_task:
             self.monitor_scheduler_task.cancel()
         
+        # 断开所有连接
         tasks = []
         for conn in self.master_connections:
             tasks.append(conn.disconnect())
