@@ -76,12 +76,18 @@ class WebSocketConnection:
         """建立WebSocket连接 - 修复：避免触发交易所限制"""
         try:
             logger.info(f"[{self.connection_id}] 正在连接 {self.ws_url}")
-            self.ws = await websockets.connect(
-                self.ws_url,
-                ping_interval=self.ping_interval,
-                ping_timeout=self.ping_interval + 5,
-                close_timeout=1
+            
+            # 🚨 增强：增加连接超时保护
+            self.ws = await asyncio.wait_for(
+                websockets.connect(
+                    self.ws_url,
+                    ping_interval=self.ping_interval,
+                    ping_timeout=self.ping_interval + 5,
+                    close_timeout=1
+                ),
+                timeout=30  # 30秒超时
             )
+            
             self.connected = True
             self.last_message_time = datetime.now()
             self.reconnect_count = 0
@@ -113,6 +119,10 @@ class WebSocketConnection:
             
             return True
             
+        except asyncio.TimeoutError:
+            logger.error(f"[{self.connection_id}] 连接超时30秒")
+            self.connected = False
+            return False
         except Exception as e:
             logger.error(f"[{self.connection_id}] 连接失败: {e}")
             self.connected = False
@@ -561,22 +571,4 @@ class WebSocketConnection:
             logger.info(f"[{self.connection_id}] 连接已断开")
             
         except Exception as e:
-            logger.error(f"[{self.connection_id}] 断开连接错误: {e}")
-    
-    async def check_health(self) -> Dict[str, Any]:
-        """检查连接健康状态"""
-        now = datetime.now()
-        last_msg_seconds = (now - self.last_message_time).total_seconds() if self.last_message_time else 999
-        
-        return {
-            "connection_id": self.connection_id,
-            "exchange": self.exchange,
-            "type": self.connection_type,
-            "connected": self.connected,
-            "subscribed": self.subscribed,
-            "is_active": self.is_active,
-            "symbols_count": len(self.symbols),
-            "last_message_seconds_ago": last_msg_seconds,
-            "reconnect_count": self.reconnect_count,
-            "timestamp": now.isoformat()
-    }
+            logger.error(f"[{self.connection_id}] 断
