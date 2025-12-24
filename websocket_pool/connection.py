@@ -76,18 +76,12 @@ class WebSocketConnection:
         """建立WebSocket连接 - 修复：避免触发交易所限制"""
         try:
             logger.info(f"[{self.connection_id}] 正在连接 {self.ws_url}")
-            
-            # 🚨 增强：增加连接超时保护
-            self.ws = await asyncio.wait_for(
-                websockets.connect(
-                    self.ws_url,
-                    ping_interval=self.ping_interval,
-                    ping_timeout=self.ping_interval + 5,
-                    close_timeout=1
-                ),
-                timeout=30  # 30秒超时
+            self.ws = await websockets.connect(
+                self.ws_url,
+                ping_interval=self.ping_interval,
+                ping_timeout=self.ping_interval + 5,
+                close_timeout=1
             )
-            
             self.connected = True
             self.last_message_time = datetime.now()
             self.reconnect_count = 0
@@ -103,7 +97,6 @@ class WebSocketConnection:
             
             # 🚨 【关键修复】温备连接延迟订阅（避免触发交易所限制）
             elif self.connection_type == ConnectionType.WARM_STANDBY and self.symbols:
-                # 根据连接ID决定延迟时间（错开订阅）
                 delay_seconds = self._get_delay_for_warm_standby()
                 self.delayed_subscribe_task = asyncio.create_task(
                     self._delayed_subscribe(delay_seconds)
@@ -119,10 +112,6 @@ class WebSocketConnection:
             
             return True
             
-        except asyncio.TimeoutError:
-            logger.error(f"[{self.connection_id}] 连接超时30秒")
-            self.connected = False
-            return False
         except Exception as e:
             logger.error(f"[{self.connection_id}] 连接失败: {e}")
             self.connected = False
@@ -130,7 +119,6 @@ class WebSocketConnection:
     
     def _get_delay_for_warm_standby(self):
         """根据连接ID获取延迟时间，错开订阅"""
-        # 从连接ID中提取编号，如 "binance_warm_0" -> 0
         try:
             parts = self.connection_id.split('_')
             if len(parts) >= 3:
@@ -287,7 +275,7 @@ class WebSocketConnection:
             if self.symbols and not self.symbols[0].endswith('-SWAP'):
                 logger.warning(f"[{self.connection_id}] OKX合约格式可能错误，应为 BTC-USDT-SWAP 格式")
             
-            # 🚨 【修复】同时订阅 tickers 和 funding-rate 频道
+            # 🚨 同时订阅 tickers 和 funding-rate 频道
             all_subscriptions = []
             for symbol in self.symbols:
                 # 订阅 tickers 频道
@@ -412,7 +400,7 @@ class WebSocketConnection:
             logger.error(f"[{self.connection_id}] 处理消息错误: {e}")
     
     async def _process_binance_message(self, data):
-        """处理币安消息"""
+        """处理币安消息 - 透传所有原始字段"""
         # 订阅响应
         if "result" in data or "id" in data:
             return
@@ -424,24 +412,13 @@ class WebSocketConnection:
             if not symbol:
                 return
             
-            # 🚨 【关键修复】使用每个连接独立的计数器
-            self.ticker_count += 1
-            
-            if self.ticker_count % 100 == 0:
-                logger.info(f"[{self.connection_id}] 已处理 {self.ticker_count} 个ticker消息")
-            
+            # ✅ 透传所有原始字段
             processed = {
                 "exchange": "binance",
                 "symbol": symbol,
                 "data_type": "ticker",
-                "price_change_percent": float(data.get("P", 0)),
-                "last_price": float(data.get("c", 0)),
-                "volume": float(data.get("v", 0)),
-                "quote_volume": float(data.get("q", 0)),
-                "high_price": float(data.get("h", 0)),
-                "low_price": float(data.get("l", 0)),
-                "event_time": data.get("E", 0),
-                "timestamp": datetime.now().isoformat()
+                "raw_data": {**data},  # 展开所有原始数据
+                "processed_time": datetime.now().isoformat()
             }
             
             try:
@@ -452,22 +429,13 @@ class WebSocketConnection:
         elif event_type == "markPriceUpdate":
             symbol = data.get("s", "").upper()
             
-            # 🚨 新增：收集币安合约名
-            if SYMBOL_COLLECTOR_AVAILABLE:
-                try:
-                    add_symbol_from_websocket("binance", symbol)
-                except Exception as e:
-                    logger.debug(f"收集币安合约失败 {symbol}: {e}")
-            
+            # ✅ 透传所有原始字段
             processed = {
                 "exchange": "binance",
                 "symbol": symbol,
                 "data_type": "mark_price",
-                "mark_price": float(data.get("p", 0)),
-                "funding_rate": float(data.get("r", 0)),
-                "next_funding_time": data.get("T", 0),
-                "event_time": data.get("E", 0),
-                "timestamp": datetime.now().isoformat()
+                "raw_data": {**data},  # 展开所有原始数据
+                "processed_time": datetime.now().isoformat()
             }
             
             try:
@@ -476,7 +444,7 @@ class WebSocketConnection:
                 logger.error(f"[{self.connection_id}] 数据回调失败: {e}")
     
     async def _process_okx_message(self, data):
-        """处理欧意消息"""
+        """处理欧意消息 - 透传所有原始字段"""
         if data.get("event"):
             event_type = data.get("event")
             if event_type == "error":
@@ -495,27 +463,25 @@ class WebSocketConnection:
                     funding_data = data["data"][0]
                     processed_symbol = symbol.replace('-USDT-SWAP', 'USDT')
                     
-                    # 🚨 新增：收集OKX合约名
-                    if SYMBOL_COLLECTOR_AVAILABLE:
-                        try:
-                            add_symbol_from_websocket("okx", processed_symbol)
-                        except Exception as e:
-                            logger.debug(f"收集OKX合约失败 {processed_symbol}: {e}")
-                    
-                    # 🚨 【关键修复】记录哪个连接收到的数据
-                    funding_rate = float(funding_data.get("fundingRate", 0))
-                    logger.info(f"[{self.connection_id}] 收到资金费率: {processed_symbol}={funding_rate:.6f}")
-                    
+                    # ✅ 透传所有原始字段（包含fundingTime, nextFundingTime, settState等）
                     processed = {
                         "exchange": "okx",
                         "symbol": processed_symbol,
                         "data_type": "funding_rate",
-                        "funding_rate": funding_rate,
-                        "next_funding_time": funding_data.get("fundingTime", ""),
-                        "mark_price": float(funding_data.get("markPx", 0)),
-                        "timestamp": datetime.now().isoformat(),
-                        "original_symbol": symbol
+                        "original_symbol": symbol,
+                        "raw_data": {**funding_data},  # 展开所有原始资金费率数据
+                        "processed_time": datetime.now().isoformat()
                     }
+                    
+                    # 打印验证（每10条打印一次）
+                    if not hasattr(self, '_funding_log_count'):
+                        self._funding_log_count = 0
+                    self._funding_log_count += 1
+                    if self._funding_log_count % 10 == 0:
+                        logger.info(f"[{self.connection_id}] ✅ 原始资金费率数据: {processed_symbol} | "
+                                   f"字段数={len(funding_data)} | "
+                                   f"ts={funding_data.get('ts')}")
+                    
                     try:
                         await self.data_callback(processed)
                     except Exception as e:
@@ -524,29 +490,18 @@ class WebSocketConnection:
             elif channel == "tickers":
                 if data.get("data") and len(data["data"]) > 0:
                     ticker_data = data["data"][0]
-                    
-                    # 🚨 【关键修复】每个连接独立的计数器
-                    self.okx_ticker_count += 1
-                    
-                    # 🚨 【关键修复】每处理一定数量就打印一次，包含真实连接ID
-                    if self.okx_ticker_count % 50 == 0:
-                        logger.info(f"[{self.connection_id}] 已处理 {self.okx_ticker_count} 个OKX ticker")
-                    
                     processed_symbol = symbol.replace('-USDT-SWAP', 'USDT')
+                    
+                    # ✅ 透传所有原始字段
                     processed = {
                         "exchange": "okx",
                         "symbol": processed_symbol,
                         "data_type": "ticker",
-                        "price_change_percent": float(ticker_data.get("sodUtc8", 0)),
-                        "last_price": float(ticker_data.get("last", 0)),
-                        "volume": float(ticker_data.get("volCcy24h", 0)),
-                        "quote_volume": float(ticker_data.get("vol24h", 0)),
-                        "high_price": float(ticker_data.get("high24h", 0)),
-                        "low_price": float(ticker_data.get("low24h", 0)),
-                        "timestamp": ticker_data.get("ts", ""),
-                        "processed_time": datetime.now().isoformat(),
-                        "original_symbol": symbol
+                        "original_symbol": symbol,
+                        "raw_data": {**ticker_data},  # 展开所有原始行情数据
+                        "processed_time": datetime.now().isoformat()
                     }
+                    
                     try:
                         await self.data_callback(processed)
                     except Exception as e:
@@ -558,30 +513,20 @@ class WebSocketConnection:
     async def disconnect(self):
         """断开连接"""
         try:
-            # 🚨 修复：取消延迟订阅任务
             if self.delayed_subscribe_task:
                 self.delayed_subscribe_task.cancel()
-                logger.debug(f"[{self.connection_id}] 延迟订阅任务已取消")
             
-            # 🚨 修复：关闭WebSocket连接
             if self.ws and self.connected:
                 await self.ws.close()
                 self.connected = False
-                logger.info(f"[{self.connection_id}] WebSocket已关闭")
                 
-            # 🚨 修复：取消接收任务
             if self.receive_task:
                 self.receive_task.cancel()
-                logger.debug(f"[{self.connection_id}] 接收任务已取消")
                 
-            self.subscribed = False
-            self.is_active = False
-            
-            logger.info(f"[{self.connection_id}] 连接已完全断开")
+            logger.info(f"[{self.connection_id}] 连接已断开")
             
         except Exception as e:
-            # 🚨 修复：SyntaxError - 确保字符串正确闭合
-            logger.error(f"[{self.connection_id}] 断开连接时发生错误: {e}")
+            logger.error(f"[{self.connection_id}] 断开连接错误: {e}")
     
     async def check_health(self) -> Dict[str, Any]:
         """检查连接健康状态"""
