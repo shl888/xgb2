@@ -1,7 +1,6 @@
 # websocket_pool/admin.py
 """
-WebSocket连接池管理员 - 生产级实现
-大脑核心只与这个类交互，不直接接触模块内部组件
+WebSocket连接池管理员 - 生产级实现 + 后置检查
 """
 
 import asyncio
@@ -9,34 +8,19 @@ import logging
 from typing import Dict, Any, Optional, Callable
 from datetime import datetime
 
-# 模块内部导入（大脑不需要知道这些）
+# 模块内部导入
 from .pool_manager import WebSocketPoolManager
 from .monitor import ConnectionMonitor
 
 logger = logging.getLogger(__name__)
 
 class WebSocketAdmin:
-    """
-    WebSocket模块管理员
-    职责：
-    1. 封装WebSocketPoolManager和ConnectionMonitor的复杂性
-    2. 对外提供简单的启动、停止、查询接口
-    3. 处理模块内部协调逻辑
-    4. 向大脑核心汇报精简状态，不暴露内部实现
-    """
+    """WebSocket模块管理员"""
     
     def __init__(self, data_callback: Optional[Callable] = None):
-        """
-        初始化管理员
-        
-        Args:
-            data_callback: 数据回调函数，可选（None时使用默认回调）
-        """
-        # 模块内部组件，对外部隐藏
         self._pool_manager = WebSocketPoolManager(data_callback)
         self._monitor = ConnectionMonitor(self._pool_manager)
         
-        # 管理员状态
         self._running = False
         self._initialized = False
         
@@ -45,15 +29,15 @@ class WebSocketAdmin:
     # ========== 对外接口（大脑核心只调用这些方法）==========
     
     async def start(self):
-        """启动整个WebSocket模块"""
+        """启动整个WebSocket模块 - 增强版"""
         if self._running:
             logger.warning("WebSocket模块已在运行中")
             return True
         
         try:
-            logger.info("=" * 60)
+            logger.info(f"{'=' * 60}")
             logger.info("WebSocketAdmin 正在启动模块...")
-            logger.info("=" * 60)
+            logger.info(f"{'=' * 60}")
             
             # 1. 初始化连接池
             logger.info("[管理员] 步骤1: 初始化WebSocket连接池")
@@ -63,17 +47,39 @@ class WebSocketAdmin:
             logger.info("[管理员] 步骤2: 启动连接监控")
             await self._monitor.start_monitoring()
             
+            # 3. 🚨 新增：强制检查每个交易所的监控调度器
+            logger.info("[管理员] 步骤3: 强制检查各交易所监控调度器")
+            await self._enforce_all_monitor_schedulers()
+            
             self._running = True
             self._initialized = True
             
             logger.info("✅ WebSocketAdmin 模块启动成功")
-            logger.info("=" * 60)
+            logger.info(f"{'=' * 60}")
             return True
             
         except Exception as e:
             logger.error(f"WebSocketAdmin 启动失败: {e}")
-            await self.stop()  # 确保已启动的部分被关闭
+            await self.stop()
             return False
+    
+    async def _enforce_all_monitor_schedulers(self):
+        """🚨 强制检查所有交易所的监控调度器"""
+        for exchange_name, pool in self._pool_manager.exchange_pools.items():
+            logger.info(f"[管理员] 检查 [{exchange_name}] 监控调度器状态...")
+            
+            if not pool.monitor_connection or not pool.monitor_connection.connected:
+                logger.warning(f"[管理员] ⚠️ [{exchange_name}] 监控连接异常，强制执行初始化")
+                await pool._initialize_monitor_scheduler()
+            
+            if not pool.monitor_scheduler_task or pool.monitor_scheduler_task.done():
+                logger.warning(f"[管理员] ⚠️ [{exchange_name}] 调度循环未运行，强制执行")
+                pool.monitor_scheduler_task = asyncio.create_task(
+                    pool._monitor_scheduling_loop()
+                )
+                logger.info(f"[管理员] ✅ [{exchange_name}] 调度循环已强制启动")
+            else:
+                logger.info(f"[管理员] ✅ [{exchange_name}] 监控调度器状态正常")
     
     async def stop(self):
         """停止整个WebSocket模块"""
@@ -83,11 +89,9 @@ class WebSocketAdmin:
         
         logger.info("WebSocketAdmin 正在停止模块...")
         
-        # 1. 停止监控
         if self._monitor:
             await self._monitor.stop_monitoring()
         
-        # 2. 关闭连接池
         if self._pool_manager:
             await self._pool_manager.shutdown()
         
@@ -95,12 +99,10 @@ class WebSocketAdmin:
         logger.info("✅ WebSocketAdmin 模块已停止")
     
     async def get_status(self) -> Dict[str, Any]:
-        """获取模块状态摘要（精简信息，不包含内部细节）"""
+        """获取模块状态摘要（精简信息）"""
         try:
-            # 获取内部详细状态
             internal_status = await self._pool_manager.get_all_status()
             
-            # 精简状态，只汇报大脑核心关心的信息
             summary = {
                 "module": "websocket_pool",
                 "status": "healthy" if self._running else "stopped",
@@ -111,7 +113,6 @@ class WebSocketAdmin:
             
             for exchange, ex_status in internal_status.items():
                 if isinstance(ex_status, dict):
-                    # 简化交易所状态
                     masters = ex_status.get("masters", [])
                     warm_standbys = ex_status.get("warm_standbys", [])
                     
@@ -138,7 +139,7 @@ class WebSocketAdmin:
             }
     
     async def health_check(self) -> Dict[str, Any]:
-        """健康检查（快速检查，只返回是否正常）"""
+        """健康检查（快速检查）"""
         if not self._running:
             return {
                 "healthy": False,
@@ -146,7 +147,6 @@ class WebSocketAdmin:
             }
         
         try:
-            # 快速检查连接池状态
             status = await self.get_status()
             
             # 检查是否有严重问题
@@ -181,7 +181,6 @@ class WebSocketAdmin:
             pool = self._pool_manager.exchange_pools[exchange_name]
             logger.info(f"[管理员] 正在重连交易所: {exchange_name}")
             
-            # 调用内部方法重新初始化
             symbols = pool.symbols
             await pool.shutdown()
             await asyncio.sleep(2)
