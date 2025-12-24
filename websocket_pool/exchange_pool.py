@@ -26,7 +26,13 @@ class ExchangeWebSocketPool:
     
     def __init__(self, exchange: str, data_callback=None):
         self.exchange = exchange
-        self.data_callback = data_callback or self._default_data_callback
+        # ✅【关键修改】使用传入的回调，如果没有则创建默认回调
+        if data_callback:
+            self.data_callback = data_callback
+        else:
+            # 创建默认回调，直接对接共享数据模块
+            self.data_callback = self._create_default_callback()
+            
         self.config = EXCHANGE_CONFIGS.get(exchange, {})
         
         # 连接池
@@ -41,23 +47,28 @@ class ExchangeWebSocketPool:
         # 任务 - 🚨 简化：只保留必要的健康检查
         self.health_check_task = None
         self.monitor_scheduler_task = None  # 🚨 新增：监控调度任务
-        
-    async def _default_data_callback(self, data):
-        """默认数据回调"""
-        try:
-            if "exchange" not in data or "symbol" not in data:
-                logger.warning(f"[{self.exchange}] 数据缺少必要字段: {data}")
-                return
-                
-            await data_store.update_market_data(
-                data["exchange"],
-                data["symbol"],
-                data
-            )
-                
-        except Exception as e:
-            logger.error(f"[{self.exchange}] 数据存储失败: {e}")
     
+    def _create_default_callback(self):
+        """创建默认回调函数，直接对接共享数据模块"""
+        async def default_callback(data):
+            """默认数据回调 - 直接存入共享存储"""
+            try:
+                if "exchange" not in data or "symbol" not in data:
+                    logger.warning(f"[{self.exchange}] 数据缺少必要字段: {data}")
+                    return
+                    
+                # ✅【关键修改】直接调用 data_store.update_market_data
+                await data_store.update_market_data(
+                    data["exchange"],
+                    data["symbol"],
+                    data
+                )
+                    
+            except Exception as e:
+                logger.error(f"[{self.exchange}] 数据存储失败: {e}")
+        
+        return default_callback
+        
     async def initialize(self, symbols: List[str]):
         """初始化连接池"""
         self.symbols = symbols
