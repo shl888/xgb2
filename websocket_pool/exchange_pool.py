@@ -71,34 +71,48 @@ class ExchangeWebSocketPool:
         
     async def initialize(self, symbols: List[str]):
         """初始化连接池"""
-        self.symbols = symbols
-        
-        symbols_per_master = self.config.get("symbols_per_master", 300)
-        self.symbol_groups = [
-            symbols[i:i + symbols_per_master]
-            for i in range(0, len(symbols), symbols_per_master)
-        ]
-        
-        masters_count = self.config.get("masters_count", 3)
-        if len(self.symbol_groups) > masters_count:
-            self._balance_symbol_groups(masters_count)
-        
-        logger.info(f"[{self.exchange}] 初始化连接池，共 {len(symbols)} 个合约，分为 {len(self.symbol_groups)} 组")
-        
-        # 初始化主连接
-        await self._initialize_masters()
-        
-        # 初始化温备连接
-        await self._initialize_warm_standbys()
-        
-        # 🚨 初始化监控连接（调度中心）
-        await self._initialize_monitor_scheduler()
-        
-        # 启动健康检查（只检查，不行动）
-        self.health_check_task = asyncio.create_task(self._health_check_loop())
-        
-        # 🚨 不需要 _failover_monitor，监控连接负责调度
-        
+        try:
+            self.symbols = symbols
+            
+            symbols_per_master = self.config.get("symbols_per_master", 300)
+            self.symbol_groups = [
+                symbols[i:i + symbols_per_master]
+                for i in range(0, len(symbols), symbols_per_master)
+            ]
+            
+            masters_count = self.config.get("masters_count", 3)
+            if len(self.symbol_groups) > masters_count:
+                self._balance_symbol_groups(masters_count)
+            
+            logger.info(f"[{self.exchange}] 初始化连接池，共 {len(symbols)} 个合约，分为 {len(self.symbol_groups)} 组")
+            
+            # 🚨 添加执行顺序日志
+            logger.info(f"[{self.exchange}] 步骤1: 开始初始化主连接")
+            
+            # 初始化主连接
+            await self._initialize_masters()
+            
+            logger.info(f"[{self.exchange}] 步骤2: 开始初始化温备连接")
+            
+            # 初始化温备连接
+            await self._initialize_warm_standbys()
+            
+            logger.info(f"[{self.exchange}] 步骤3: 开始初始化监控连接")
+            
+            # 🚨 初始化监控连接（调度中心）
+            await self._initialize_monitor_scheduler()
+            
+            logger.info(f"[{self.exchange}] 步骤4: 启动健康检查")
+            
+            # 启动健康检查（只检查，不行动）
+            self.health_check_task = asyncio.create_task(self._health_check_loop())
+            
+            logger.info(f"[{self.exchange}] ✅ 所有初始化步骤完成")
+            
+        except Exception as e:
+            logger.error(f"[{self.exchange}] 初始化连接池失败: {e}", exc_info=True)
+            raise
+    
     def _balance_symbol_groups(self, target_groups: int):
         """平衡合约分组"""
         avg_size = len(self.symbols) // target_groups
@@ -176,29 +190,106 @@ class ExchangeWebSocketPool:
     
     async def _initialize_monitor_scheduler(self):
         """🚨 初始化监控连接 - 作为调度中心"""
-        ws_url = self.config.get("ws_public_url")
-        
-        conn_id = f"{self.exchange}_monitor"
-        self.monitor_connection = WebSocketConnection(
-            exchange=self.exchange,
-            ws_url=ws_url,
-            connection_id=conn_id,
-            connection_type=ConnectionType.MONITOR,
-            data_callback=self.data_callback,
-            symbols=[]  # 调度器不订阅数据
-        )
-        
-        success = await self.monitor_connection.connect()
-        if success:
-            logger.info(f"[{conn_id}] 监控调度器启动成功")
+        try:
+            logger.info(f"【监控启动】开始初始化 {self.exchange} 监控调度器...")
             
-            # 🚨 关键：启动监控调度循环（接管故障转移职责）
-            self.monitor_scheduler_task = asyncio.create_task(
-                self._monitor_scheduling_loop()
+            ws_url = self.config.get("ws_public_url")
+            if not ws_url:
+                logger.error(f"【监控启动】{self.exchange} 缺少ws_public_url配置")
+                return
+            
+            conn_id = f"{self.exchange}_monitor"
+            logger.info(f"【监控启动】连接ID: {conn_id}, URL: {ws_url}")
+            
+            # 🚨 为监控连接创建专用的回调函数
+            def monitor_callback(data):
+                """监控专用回调 - 只确认连接活跃"""
+                try:
+                    # 更新最后消息时间
+                    if self.monitor_connection:
+                        import time
+                        self.monitor_connection.last_message_time = time.time()
+                except Exception as e:
+                    logger.error(f"[{conn_id}] 监控回调错误: {e}")
+            
+            logger.info(f"【监控启动】正在创建WebSocketConnection对象...")
+            
+            self.monitor_connection = WebSocketConnection(
+                exchange=self.exchange,
+                ws_url=ws_url,
+                connection_id=conn_id,
+                connection_type=ConnectionType.MONITOR,
+                data_callback=monitor_callback,  # 🚨 使用专用回调，不是self.data_callback
+                symbols=[]  # 调度器不订阅数据
             )
-            logger.info(f"[{conn_id}] 监控调度循环已启动")
-        else:
-            logger.error(f"[{conn_id}] 监控调度器启动失败")
+            
+            logger.info(f"【监控启动】正在连接WebSocket...")
+            
+            # 🚨 添加连接超时控制
+            try:
+                success = await asyncio.wait_for(
+                    self.monitor_connection.connect(),
+                    timeout=10.0  # 10秒超时
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"【监控启动】连接超时")
+                success = False
+            except Exception as conn_error:
+                logger.error(f"【监控启动】连接异常: {conn_error}")
+                success = False
+            
+            if success:
+                logger.info(f"✅【监控启动】[{conn_id}] 监控连接成功")
+                
+                # 🚨 启动监控调度循环
+                try:
+                    logger.info(f"【监控启动】正在创建监控调度循环任务...")
+                    self.monitor_scheduler_task = asyncio.create_task(
+                        self._monitor_scheduling_loop(),
+                        name=f"{conn_id}_scheduler"
+                    )
+                    
+                    # 添加任务状态检查
+                    await asyncio.sleep(0.1)  # 给任务一点时间启动
+                    if not self.monitor_scheduler_task.done():
+                        logger.info(f"✅【监控启动】[{conn_id}] 监控调度循环已启动")
+                    else:
+                        logger.error(f"❌【监控启动】监控调度任务立即结束了")
+                        
+                except Exception as task_error:
+                    logger.error(f"❌【监控启动】创建调度任务失败: {task_error}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+            else:
+                logger.error(f"❌【监控启动】[{conn_id}] 监控连接失败")
+                
+                # 🚨 记录重试
+                logger.info(f"【监控启动】5秒后重试监控连接...")
+                await asyncio.sleep(5)
+                asyncio.create_task(self._retry_monitor_initialization())
+                
+        except Exception as e:
+            logger.error(f"❌【监控启动】初始化监控调度器时发生异常: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+    
+    async def _retry_monitor_initialization(self):
+        """重试初始化监控连接"""
+        conn_id = f"{self.exchange}_monitor"
+        retry_count = 0
+        max_retries = 3
+        
+        while retry_count < max_retries:
+            retry_count += 1
+            logger.warning(f"【监控重试】第{retry_count}次重试初始化 {self.exchange} 监控连接...")
+            
+            try:
+                await self._initialize_monitor_scheduler()
+                break
+            except Exception as e:
+                logger.error(f"【监控重试】第{retry_count}次重试失败: {e}")
+                if retry_count < max_retries:
+                    await asyncio.sleep(5 * retry_count)  # 指数退避
     
     async def _monitor_scheduling_loop(self):
         """🚨 监控调度循环 - 真正的权力中心"""
