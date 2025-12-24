@@ -558,17 +558,45 @@ class WebSocketConnection:
     async def disconnect(self):
         """断开连接"""
         try:
+            # 🚨 修复：取消延迟订阅任务
             if self.delayed_subscribe_task:
                 self.delayed_subscribe_task.cancel()
+                logger.debug(f"[{self.connection_id}] 延迟订阅任务已取消")
             
+            # 🚨 修复：关闭WebSocket连接
             if self.ws and self.connected:
                 await self.ws.close()
                 self.connected = False
+                logger.info(f"[{self.connection_id}] WebSocket已关闭")
                 
+            # 🚨 修复：取消接收任务
             if self.receive_task:
                 self.receive_task.cancel()
+                logger.debug(f"[{self.connection_id}] 接收任务已取消")
                 
-            logger.info(f"[{self.connection_id}] 连接已断开")
+            self.subscribed = False
+            self.is_active = False
+            
+            logger.info(f"[{self.connection_id}] 连接已完全断开")
             
         except Exception as e:
-            logger.error(f"[{self.connection_id}] 断
+            # 🚨 修复：SyntaxError - 确保字符串正确闭合
+            logger.error(f"[{self.connection_id}] 断开连接时发生错误: {e}")
+    
+    async def check_health(self) -> Dict[str, Any]:
+        """检查连接健康状态"""
+        now = datetime.now()
+        last_msg_seconds = (now - self.last_message_time).total_seconds() if self.last_message_time else 999
+        
+        return {
+            "connection_id": self.connection_id,
+            "exchange": self.exchange,
+            "type": self.connection_type,
+            "connected": self.connected,
+            "subscribed": self.subscribed,
+            "is_active": self.is_active,
+            "symbols_count": len(self.symbols),
+            "last_message_seconds_ago": last_msg_seconds,
+            "reconnect_count": self.reconnect_count,
+            "timestamp": now.isoformat()
+        }
