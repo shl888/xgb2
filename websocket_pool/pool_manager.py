@@ -1,5 +1,5 @@
 """
-WebSocket连接池总管理器 - 角色互换版
+WebSocket连接池总管理器 - 角色互换版 + 增强诊断
 """
 import asyncio
 import logging
@@ -86,15 +86,15 @@ class WebSocketPoolManager:
         self._shutting_down = False  # ✅ 新增：关闭状态跟踪
         
     async def initialize(self):
-        """初始化所有交易所连接池"""
+        """初始化所有交易所连接池 - 防重入版"""
         if self.initialized or self._initializing:
             logger.info("WebSocket连接池已在初始化或已初始化")
             return
         
         self._initializing = True
-        logger.info("=" * 60)
+        logger.info(f"{'=' * 60}")
         logger.info("正在初始化WebSocket连接池管理器...")
-        logger.info("=" * 60)
+        logger.info(f"{'=' * 60}")
         
         # 获取所有交易所的合约（使用你的成功方法）
         exchange_tasks = []
@@ -110,7 +110,7 @@ class WebSocketPoolManager:
         self.initialized = True
         self._initializing = False
         logger.info("✅ WebSocket连接池管理器初始化完成")
-        logger.info("=" * 60)
+        logger.info(f"{'=' * 60}")
     
     async def _setup_exchange_pool(self, exchange_name: str):
         """设置单个交易所连接池"""
@@ -399,4 +399,3 @@ class WebSocketPoolManager:
                 logger.error(f"[{exchange_name}] 关闭连接池错误: {e}")
         
         logger.info("✅ 所有WebSocket连接池已关闭")
-        
