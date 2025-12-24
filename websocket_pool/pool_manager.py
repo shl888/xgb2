@@ -22,10 +22,10 @@ from .static_symbols import STATIC_SYMBOLS  # 导入静态合约
 
 logger = logging.getLogger(__name__)
 
-# ============ 【新增：默认数据回调函数】============
+# ============ 【修复：默认数据回调函数】============
 async def default_data_callback(data):
     """
-    默认数据回调函数 - 将WebSocket接收的数据存入共享存储
+    默认数据回调函数 - 将WebSocket接收的数据直接存入共享存储
     这是数据流的关键节点：WebSocket → 此函数 → data_store
     """
     try:
@@ -36,11 +36,15 @@ async def default_data_callback(data):
         exchange = data.get("exchange", "")
         symbol = data.get("symbol", "")
         
-        if not exchange or not symbol:
-            logger.warning(f"数据缺少必要字段: {data}")
+        if not exchange:
+            logger.error(f"数据缺少exchange字段: {data}")
+            return
+        if not symbol:
+            logger.error(f"数据缺少symbol字段: {data}")
             return
         
-        # 关键步骤：将数据存入共享存储
+        # ✅【关键修复】直接调用 data_store.update_market_data
+        # 传递三个参数：exchange, symbol, data
         await data_store.update_market_data(exchange, symbol, data)
         
         # 记录日志（每100条记录一次，避免日志过多）
@@ -48,6 +52,11 @@ async def default_data_callback(data):
         if default_data_callback.counter % 100 == 0:
             logger.info(f"[数据回调] 已处理 {default_data_callback.counter} 条数据，最新: {exchange} {symbol}")
             
+    except TypeError as e:
+        # 如果参数错误，记录详细错误信息
+        logger.error(f"回调参数错误: {e}，数据格式可能不正确")
+        logger.error(f"数据内容: exchange={data.get('exchange')}, symbol={data.get('symbol')}")
+        logger.error(f"数据keys: {list(data.keys())}")
     except Exception as e:
         logger.error(f"数据回调函数错误: {e}，数据: {data}")
 
@@ -62,15 +71,20 @@ class WebSocketPoolManager:
         参数:
             data_callback: 数据回调函数，如果为None则使用默认回调
         """
-        # ✅ 修改：使用传入的回调或默认回调
-        self.data_callback = data_callback or default_data_callback
+        # ✅【关键修改】优先使用传入的回调，如果没有则使用默认回调
+        if data_callback:
+            self.data_callback = data_callback
+            logger.info(f"WebSocketPoolManager 使用自定义数据回调")
+        else:
+            # 使用我们修复的默认回调
+            self.data_callback = default_data_callback
+            logger.info(f"WebSocketPoolManager 使用默认数据回调（直接对接共享数据模块）")
+        
         self.exchange_pools = {}  # exchange_name -> ExchangeWebSocketPool
         self.initialized = False
         self._initializing = False  # ✅ 新增：初始化状态跟踪
         self._shutting_down = False  # ✅ 新增：关闭状态跟踪
         
-        logger.info(f"WebSocketPoolManager 初始化完成，使用回调: {'自定义' if data_callback else '默认'}")
-    
     async def initialize(self):
         """初始化所有交易所连接池"""
         if self.initialized or self._initializing:
@@ -385,3 +399,4 @@ class WebSocketPoolManager:
                 logger.error(f"[{exchange_name}] 关闭连接池错误: {e}")
         
         logger.info("✅ 所有WebSocket连接池已关闭")
+        
