@@ -11,6 +11,7 @@ import sys
 import os
 import traceback
 from datetime import datetime
+from typing import Dict, Any
 
 # 设置路径 - Render兼容版
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -79,21 +80,61 @@ class BrainCore:
     """大脑核心 - 总控制器（Render优化版）"""
     
     def __init__(self):
-        # ✅ 修改：连接池直接调用 data_store，而不是大脑
-        self.ws_admin = None
+        # ✅【关键修改1】创建直接对接共享数据模块的回调函数
+        async def direct_to_datastore(data: Dict[str, Any]):
+            """
+            直接对接共享数据模块的回调
+            WebSocket数据直接进入共享数据模块，不经过大脑的原始数据处理
+            """
+            try:
+                # 验证数据格式
+                if not isinstance(data, dict):
+                    logger.error(f"回调数据不是字典类型: {type(data)}")
+                    return
+                    
+                exchange = data.get("exchange")
+                symbol = data.get("symbol")
+                
+                if not exchange:
+                    logger.error(f"数据缺少exchange字段: {data.keys()}")
+                    return
+                if not symbol:
+                    logger.error(f"数据缺少symbol字段: {data.keys()}")
+                    return
+                    
+                # ✅【关键】直接调用 data_store.update_market_data
+                # 传递三个参数：exchange, symbol, data
+                await data_store.update_market_data(exchange, symbol, data)
+                
+                # 调试日志（可选）
+                direct_to_datastore.counter = getattr(direct_to_datastore, 'counter', 0) + 1
+                if direct_to_datastore.counter % 100 == 0:
+                    logger.info(f"[大脑回调] 直接处理 {direct_to_datastore.counter} 条数据到共享模块")
+                    
+            except TypeError as e:
+                # 如果参数错误，尝试备用方法
+                logger.error(f"回调参数错误: {e}")
+                logger.error(f"数据格式: {type(data)}")
+                if isinstance(data, dict):
+                    logger.error(f"数据keys: {list(data.keys())}")
+            except Exception as e:
+                logger.error(f"直接对接回调错误: {e}")
         
-        # 核心组件 - 保留所有
+        # ✅【关键修改2】使用直接对接的回调
+        self.ws_admin = WebSocketAdmin(direct_to_datastore)
+        
+        # 核心组件
         self.http_server = None
         self.http_runner = None
         
-        # 状态 - 保留所有
+        # 状态
         self.running = False
         self.data_handlers = []
         
         # ✅ 设置大脑回调：接收过滤后的成品数据
         data_store.set_brain_callback(self.receive_processed_data)
         
-        # 信号处理 - 保留
+        # 信号处理
         signal.signal(signal.SIGINT, self.handle_signal)
         signal.signal(signal.SIGTERM, self.handle_signal)
     
@@ -104,29 +145,28 @@ class BrainCore:
         logger.info("=" * 60)
         
         try:
-            # 检查环境 - 保留
+            # 检查环境
             self.check_environment()
             
-            # ✅ 【第一步】先初始化HTTP服务器（最重要！）- 保留
+            # ✅ 【第一步】先初始化HTTP服务器（最重要！）
             port = int(os.getenv('PORT', 10000))  # Render要求端口10000
             logger.info(f"【第一步】初始化HTTP服务器 (端口: {port})...")
             
             self.http_server = HTTPServer(host='0.0.0.0', port=port)
             
-            # ✅ 立即启动HTTP服务器（不等待其他组件）- 保留
+            # ✅ 立即启动HTTP服务器（不等待其他组件）
             await self.start_http_server()
             
-            # ✅ 等待HTTP服务完全就绪（关键！）- 保留
+            # ✅ 等待HTTP服务完全就绪（关键！）
             await self._wait_for_http_ready()
             
-            # ✅ 【第二步】启动保活服务（HTTP就绪后才启动）- 保留
+            # ✅ 【第二步】启动保活服务（HTTP就绪后才启动）
             logger.info("【第二步】启动后台保活服务...")
             start_keep_alive_background()
             
-            # ✅ 【第三步】初始化WebSocket模块（关键修改）
+            # ✅ 【第三步】初始化WebSocket模块（使用直接对接回调）
             logger.info("【第三步】初始化WebSocket模块...")
-            # ✅ 重要修改：连接池直接调用 data_store.update_market_data
-            self.ws_admin = WebSocketAdmin(data_store.update_market_data)
+            # ✅ 重要修改：WebSocket使用direct_to_datastore回调，直接对接data_store
             await self.ws_admin.start()
             
             # 可以保留原有的数据处理器（但处理器现在接收的是成品数据）
@@ -134,7 +174,7 @@ class BrainCore:
             
             self.running = True
             logger.info("✅ HTTP服务已就绪！保活服务已启动！")
-            logger.info("✅ WebSocket模块已启动（连接池直接调用数据存储模块）...")
+            logger.info("✅ WebSocket模块已启动（数据直接进入共享数据模块）...")
             logger.info("🧠 大脑已设置为只接收过滤后的成品数据")
             logger.info("=" * 60)
             return True
@@ -190,11 +230,6 @@ class BrainCore:
             
         except Exception as e:
             logger.error(f"大脑接收成品数据错误: {e}")
-    
-    # ❌ 删除原来的 handle_websocket_data 方法
-    # async def handle_websocket_data(self, data):
-    #     """这个方法不再需要，因为大脑不再接收原始数据"""
-    #     pass
     
     def check_environment(self):
         """检查环境配置"""
@@ -362,3 +397,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
