@@ -126,8 +126,7 @@ class BrainCore:
             # ✅ 【第三步】初始化WebSocket模块（关键修改）
             logger.info("【第三步】初始化WebSocket模块...")
             # ✅ 重要修改：连接池直接调用 data_store.update_market_data
-            # 修复：使用兼容版本，因为WebSocket回调可能只传递1个参数
-            self.ws_admin = WebSocketAdmin(self._compatible_callback)
+            self.ws_admin = WebSocketAdmin(data_store.update_market_data)
             await self.ws_admin.start()
             
             # 可以保留原有的数据处理器（但处理器现在接收的是成品数据）
@@ -144,27 +143,6 @@ class BrainCore:
             logger.error(f"初始化失败: {e}")
             logger.error(traceback.format_exc())
             return False
-    
-    async def _compatible_callback(self, data):
-        """
-        兼容性回调函数
-        处理WebSocket可能只传递1个参数的情况
-        """
-        try:
-            # 如果data是字典，提取exchange和symbol
-            if isinstance(data, dict):
-                exchange = data.get("exchange", "")
-                symbol = data.get("symbol", "")
-                
-                if exchange and symbol:
-                    # 调用修复后的update_market_data
-                    await data_store.update_market_data(exchange, symbol, data)
-                else:
-                    logger.warning(f"数据缺少exchange或symbol字段: {data.keys()}")
-            else:
-                logger.error(f"回调数据不是字典: {type(data)}")
-        except Exception as e:
-            logger.error(f"兼容性回调错误: {e}")
     
     async def _wait_for_http_ready(self):
         """等待HTTP服务完全就绪"""
