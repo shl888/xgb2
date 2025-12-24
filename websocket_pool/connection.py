@@ -435,7 +435,8 @@ class WebSocketConnection:
             }
             
             try:
-                await self.data_callback(processed)
+                # ✅ 修改：传递三个参数
+                await self.data_callback(processed["exchange"], processed["symbol"], processed)
             except Exception as e:
                 logger.error(f"[{self.connection_id}] 数据回调失败: {e}")
         
@@ -461,7 +462,8 @@ class WebSocketConnection:
             }
             
             try:
-                await self.data_callback(processed)
+                # ✅ 修改：传递三个参数
+                await self.data_callback(processed["exchange"], processed["symbol"], processed)
             except Exception as e:
                 logger.error(f"[{self.connection_id}] 数据回调失败: {e}")
     
@@ -507,7 +509,8 @@ class WebSocketConnection:
                         "original_symbol": symbol
                     }
                     try:
-                        await self.data_callback(processed)
+                        # ✅ 修改：传递三个参数
+                        await self.data_callback(processed["exchange"], processed["symbol"], processed)
                     except Exception as e:
                         logger.error(f"[{self.connection_id}] 数据回调失败: {e}")
                     
@@ -538,7 +541,8 @@ class WebSocketConnection:
                         "original_symbol": symbol
                     }
                     try:
-                        await self.data_callback(processed)
+                        # ✅ 修改：传递三个参数
+                        await self.data_callback(processed["exchange"], processed["symbol"], processed)
                     except Exception as e:
                         logger.error(f"[{self.connection_id}] 数据回调失败: {e}")
                     
@@ -579,4 +583,4 @@ class WebSocketConnection:
             "last_message_seconds_ago": last_msg_seconds,
             "reconnect_count": self.reconnect_count,
             "timestamp": now.isoformat()
-    }
+        }
