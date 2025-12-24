@@ -80,7 +80,7 @@ class DataStore:
             # 同时存储一份最新数据引用（便于快速访问）
             self.market_data[exchange][symbol]['latest'] = data_type
             
-            # 调试日志：记录不同类型的数据 - 修复：使用self.logger
+            # 调试日志：记录不同类型的数据
             if data_type in ['funding_rate', 'mark_price']:
                 funding_rate = data.get('funding_rate', 0)
                 logger.debug(f"[DataStore] 存储 {exchange} {symbol} {data_type} = {funding_rate:.6f}")
