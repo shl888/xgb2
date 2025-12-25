@@ -43,6 +43,17 @@ def start_keep_alive_background():
 
 
 class BrainCore:
+    # ✅ 把receive_processed_data定义移到前面
+    async def receive_processed_data(self, processed_data):
+        """接收成品数据"""
+        try:
+            data_type = processed_data.get('type', 'unknown')
+            exchange = processed_data.get('exchange', 'unknown')
+            symbol = processed_data.get('symbol', 'unknown')
+            logger.info(f"🧠 收到数据: {exchange}:{symbol} ({data_type})")
+        except Exception as e:
+            logger.error(f"接收数据错误: {e}")
+    
     def __init__(self):
         async def direct_to_datastore(data: dict):
             try:
@@ -58,6 +69,8 @@ class BrainCore:
         self.http_runner = None
         self.running = False
         self.data_handlers = []
+        
+        # ✅ 现在receive_processed_data已经定义了，可以安全调用
         data_store.set_brain_callback(self.receive_processed_data)
         
         signal.signal(signal.SIGINT, self.handle_signal)
