@@ -6,7 +6,7 @@ from aiohttp import web
 import datetime
 import logging
 
-from ..welcome_page import get_welcome_page, get_funding_history_test_page
+from ..welcome_page import get_welcome_page  # 删除 get_funding_history_test_page
 
 logger = logging.getLogger(__name__)
 
@@ -14,12 +14,6 @@ logger = logging.getLogger(__name__)
 async def root_handler(request: web.Request) -> web.Response:
     """根路径处理器 - 返回友好的欢迎页面"""
     html_content = get_welcome_page()
-    return web.Response(text=html_content, content_type='text/html')
-
-
-async def funding_history_test_page(request: web.Request) -> web.Response:
-    """历史资金费率测试页面"""
-    html_content = get_funding_history_test_page()
     return web.Response(text=html_content, content_type='text/html')
 
 
@@ -58,8 +52,8 @@ async def health_check(request: web.Request) -> web.Response:
 def setup_main_routes(app: web.Application):
     """设置基础路由"""
     app.router.add_get('/', root_handler)
-    app.router.add_get('/test/funding_history', funding_history_test_page)
+    # 删除这行：app.router.add_get('/test/funding_history', funding_history_test_page)
     app.router.add_get('/public/ping', public_ping)
     app.router.add_get('/health', health_check)
     
-    logger.info("✅ 基础路由已加载: /, /health, /public/ping, /test/funding_history")
+    logger.info("✅ 基础路由已加载: /, /health, /public/ping")
