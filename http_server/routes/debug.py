@@ -8,11 +8,115 @@ import logging
 from typing import Dict, Any
 
 from shared_data.data_store import data_store
-from ._ import _calculate_data_age
 
 logger = logging.getLogger(__name__)
 
 
+# ============ 辅助函数（直接定义在本文件） ============
+def _calculate_data_age(timestamp_str: str) -> float:
+    """计算数据年龄（秒）"""
+    if not timestamp_str:
+        return float('inf')
+    
+    try:
+        if 'T' in timestamp_str:
+            # ISO格式
+            try:
+                if timestamp_str.endswith('Z'):
+                    timestamp_str = timestamp_str[:-1] + '+00:00'
+                data_time = datetime.datetime.fromisoformat(timestamp_str)
+            except ValueError:
+                try:
+                    if '.' in timestamp_str:
+                        timestamp_str = timestamp_str.split('.')[0]
+                    data_time = datetime.datetime.fromisoformat(timestamp_str)
+                except:
+                    return float('inf')
+        else:
+            try:
+                ts = float(timestamp_str)
+                if ts > 1e12:
+                    ts = ts / 1000
+                data_time = datetime.datetime.fromtimestamp(ts)
+            except:
+                return float('inf')
+        
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if data_time.tzinfo is None:
+            data_time = data_time.replace(tzinfo=datetime.timezone.utc)
+        
+        return (now - data_time).total_seconds()
+    except Exception:
+        return float('inf')
+
+
+def _count_data_types(exchange_data: Dict) -> Dict[str, int]:
+    """统计数据类型数量"""
+    stats = {
+        "total_symbols": 0,
+        "ticker": 0,
+        "funding_rate": 0,
+        "mark_price": 0,
+        "other": 0
+    }
+    
+    if not exchange_data:
+        return stats
+    
+    stats["total_symbols"] = len(exchange_data)
+    
+    for symbol, data_dict in exchange_data.items():
+        if isinstance(data_dict, dict):
+            for data_type in data_dict:
+                if data_type in stats:
+                    stats[data_type] += 1
+                elif data_type not in ['latest', 'store_timestamp']:
+                    stats["other"] += 1
+    
+    return stats
+
+
+def _get_sample_data(exchange_data: Dict, sample_size: int, show_types: bool = False) -> Dict:
+    """获取抽样数据"""
+    if not exchange_data:
+        return {}
+    
+    sample = {}
+    count = 0
+    
+    for symbol, data_dict in exchange_data.items():
+        if count >= sample_size:
+            break
+            
+        if not show_types and isinstance(data_dict, dict) and 'latest' in data_dict:
+            # 只显示最新数据
+            latest_type = data_dict['latest']
+            if latest_type in data_dict and latest_type != 'latest':
+                sample[symbol] = data_dict[latest_type]
+                count += 1
+        else:
+            # 显示所有数据类型
+            sample[symbol] = data_dict
+            count += 1
+    
+    return sample
+
+
+def _get_sort_key(data_item: Dict, sort_by: str) -> Any:
+    """获取排序键"""
+    if sort_by == 'rate':
+        return data_item.get('funding_rate', 0)
+    elif sort_by == 'abs_rate':
+        return abs(data_item.get('funding_rate', 0))
+    elif sort_by == 'symbol':
+        return data_item.get('symbol', '')
+    elif sort_by == 'age':
+        return data_item.get('age_seconds', float('inf'))
+    else:
+        return 0
+
+
+# ============ 主接口 ============
 async def get_all_websocket_data(request: web.Request) -> web.Response:
     """
     【核心调试接口】查看WebSocket获取的所有市场数据
@@ -78,58 +182,6 @@ async def get_all_websocket_data(request: web.Request) -> web.Response:
             "error": str(e),
             "timestamp": datetime.datetime.now().isoformat()
         }, status=500)
-
-
-def _count_data_types(exchange_data: Dict) -> Dict[str, int]:
-    """统计数据类型数量"""
-    stats = {
-        "total_symbols": 0,
-        "ticker": 0,
-        "funding_rate": 0,
-        "mark_price": 0,
-        "other": 0
-    }
-    
-    if not exchange_data:
-        return stats
-    
-    stats["total_symbols"] = len(exchange_data)
-    
-    for symbol, data_dict in exchange_data.items():
-        if isinstance(data_dict, dict):
-            for data_type in data_dict:
-                if data_type in stats:
-                    stats[data_type] += 1
-                elif data_type not in ['latest', 'store_timestamp']:
-                    stats["other"] += 1
-    
-    return stats
-
-
-def _get_sample_data(exchange_data: Dict, sample_size: int, show_types: bool = False) -> Dict:
-    """获取抽样数据"""
-    if not exchange_data:
-        return {}
-    
-    sample = {}
-    count = 0
-    
-    for symbol, data_dict in exchange_data.items():
-        if count >= sample_size:
-            break
-            
-        if not show_types and isinstance(data_dict, dict) and 'latest' in data_dict:
-            # 只显示最新数据
-            latest_type = data_dict['latest']
-            if latest_type in data_dict and latest_type != 'latest':
-                sample[symbol] = data_dict[latest_type]
-                count += 1
-        else:
-            # 显示所有数据类型
-            sample[symbol] = data_dict
-            count += 1
-    
-    return sample
 
 
 async def get_symbol_detail(request: web.Request) -> web.Response:
@@ -304,20 +356,6 @@ async def get_funding_rates(request: web.Request) -> web.Response:
             "error": str(e),
             "timestamp": datetime.datetime.now().isoformat()
         }, status=500)
-
-
-def _get_sort_key(data_item: Dict, sort_by: str) -> Any:
-    """获取排序键"""
-    if sort_by == 'rate':
-        return data_item.get('funding_rate', 0)
-    elif sort_by == 'abs_rate':
-        return abs(data_item.get('funding_rate', 0))
-    elif sort_by == 'symbol':
-        return data_item.get('symbol', '')
-    elif sort_by == 'age':
-        return data_item.get('age_seconds', float('inf'))
-    else:
-        return 0
 
 
 def setup_debug_routes(app: web.Application):
