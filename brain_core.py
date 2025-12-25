@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 大脑核心主控 - Render优化版（防重启版）
-关键点：先注册路由，再启动HTTP服务器
 """
 
 import asyncio
@@ -43,17 +42,6 @@ def start_keep_alive_background():
 
 
 class BrainCore:
-    # ✅ 把receive_processed_data定义移到前面
-    async def receive_processed_data(self, processed_data):
-        """接收成品数据"""
-        try:
-            data_type = processed_data.get('type', 'unknown')
-            exchange = processed_data.get('exchange', 'unknown')
-            symbol = processed_data.get('symbol', 'unknown')
-            logger.info(f"🧠 收到数据: {exchange}:{symbol} ({data_type})")
-        except Exception as e:
-            logger.error(f"接收数据错误: {e}")
-    
     def __init__(self):
         async def direct_to_datastore(data: dict):
             try:
@@ -70,11 +58,21 @@ class BrainCore:
         self.running = False
         self.data_handlers = []
         
-        # ✅ 现在receive_processed_data已经定义了，可以安全调用
+        # ✅ 注册回调（必须在receive_processed_data定义之后）
         data_store.set_brain_callback(self.receive_processed_data)
         
         signal.signal(signal.SIGINT, self.handle_signal)
         signal.signal(signal.SIGTERM, self.handle_signal)
+    
+    async def receive_processed_data(self, processed_data):
+        """接收成品数据"""
+        try:
+            data_type = processed_data.get('type', 'unknown')
+            exchange = processed_data.get('exchange', 'unknown')
+            symbol = processed_data.get('symbol', 'unknown')
+            logger.info(f"🧠 收到数据: {exchange}:{symbol} ({data_type})")
+        except Exception as e:
+            logger.error(f"接收数据错误: {e}")
     
     async def initialize(self):
         """初始化（防重启版）"""
@@ -107,6 +105,9 @@ class BrainCore:
             
             # WebSocket延迟启动
             asyncio.create_task(self._delayed_ws_init())
+            
+            # ✅ 资金费率自动获取（后台执行）
+            asyncio.create_task(self._auto_fetch_funding_settlement())
             
             self.running = True
             logger.info("=" * 60)
@@ -150,16 +151,24 @@ class BrainCore:
     
     async def _auto_fetch_funding_settlement(self):
         """后台获取资金费率结算数据"""
+        # 等待HTTP完全就绪
+        await asyncio.sleep(10)
+        
         if not hasattr(self, 'funding_manager'):
+            logger.warning("资金费率管理器未初始化")
             return
         
         try:
+            logger.info("=" * 60)
             logger.info("后台任务: 开始获取资金费率结算数据...")
+            logger.info("=" * 60)
+            
             result = await self.funding_manager.fetch_funding_settlement()
+            
             if result['success']:
-                logger.info(f"✅ 成功！合约数: {result['filtered_count']}, 权重: {result['weight_used']}")
+                logger.info(f"✅ 后台自动获取成功！USDT合约数: {result['filtered_count']}, 权重: {result['weight_used']}")
             else:
-                logger.error(f"❌ 失败: {result.get('error')}")
+                logger.error(f"❌ 后台自动获取失败: {result.get('error')}")
         except Exception as e:
             logger.error(f"后台获取异常: {e}")
     
