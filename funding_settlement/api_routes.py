@@ -37,9 +37,9 @@ async def get_settlement_public(request: web.Request) -> web.Response:
         formatted_data = []
         for symbol, data in funding_data.items():
             formatted_data.append({
-                "交易所": "币安",
-                "符号": symbol,
-                "data_type": "资金费率",
+                "exchange": "binance",
+                "symbol": symbol,
+                "data_type": "funding_settlement",
                 "funding_rate": data.get('funding_rate'),
                 "funding_time": data.get('funding_time'),
                 "next_funding_time": data.get('next_funding_time'),
@@ -134,3 +134,4 @@ def setup_funding_settlement_routes(app: web.Application):
     logger.info("   - GET  /api/funding/settlement/status")
     logger.info("   - POST /api/funding/settlement/fetch")
     logger.info("   - GET  /funding/settlement")
+    
