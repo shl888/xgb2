@@ -72,7 +72,7 @@ class FundingSettlementManager:
             try:
                 # Step 1: 准备参数
                 logger.info("Step 1: 准备请求参数")
-                params = {"limit": 1}
+                params = {"limit": 1000}
                 logger.info(f"   参数: {params}")
                 
                 # Step 2: 创建Session
