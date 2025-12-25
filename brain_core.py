@@ -152,7 +152,7 @@ class BrainCore:
             logger.error(f"启动HTTP服务器失败: {e}")
             raise
     
-        async def _auto_fetch_funding_settlement(self):
+    async def _auto_fetch_funding_settlement(self):
         """后台获取资金费率结算数据 - 保证初始化完成"""
         # 等待足够长时间，确保initialize()已经执行完
         await asyncio.sleep(15)
