@@ -26,6 +26,7 @@ from shared_data.data_store import data_store
 
 logger = logging.getLogger(__name__)
 
+
 # ============ 【优化版保活启动函数】============
 def start_keep_alive_background():
     """
@@ -75,6 +76,7 @@ def start_keep_alive_background():
         logger.error(f"启动保活服务失败: {e}")
         logger.info("⚠️  保活服务未启动，但主程序继续运行")
 # ============ 【优化版保活启动函数结束】============
+
 
 class BrainCore:
     """大脑核心 - 总控制器（Render优化版）"""
@@ -169,13 +171,21 @@ class BrainCore:
             # ✅ 重要修改：WebSocket使用direct_to_datastore回调，直接对接data_store
             await self.ws_admin.start()
             
-            # 可以保留原有的数据处理器（但处理器现在接收的是成品数据）
-            self.add_data_handler(self.log_important_data)
+            # ✅ 【新增第四步】初始化资金费率结算模块
+            logger.info("【第四步】初始化资金费率结算模块...")
+            from funding_settlement import FundingSettlementManager
+            self.funding_manager = FundingSettlementManager()
+            
+            # 后台自动获取（不阻塞启动）
+            asyncio.create_task(self._auto_fetch_funding_settlement())
+            
+            # ✅ 【新增第五步】注册资金费率结算路由到HTTP服务器
+            from funding_settlement.api_routes import setup_funding_settlement_routes
+            setup_funding_settlement_routes(self.http_server.app)
             
             self.running = True
-            logger.info("✅ HTTP服务已就绪！保活服务已启动！")
-            logger.info("✅ WebSocket模块已启动（数据直接进入共享数据模块）...")
-            logger.info("🧠 大脑已设置为只接收过滤后的成品数据")
+            logger.info("=" * 60)
+            logger.info("🚀 大脑核心启动完成！")
             logger.info("=" * 60)
             return True
             
@@ -374,6 +384,27 @@ class BrainCore:
             logger.error(f"关闭过程中出错: {e}")
         
         sys.exit(0)
+    
+    # ✅ 【新增】后台自动获取资金费率结算数据
+    async def _auto_fetch_funding_settlement(self):
+        """后台自动获取资金费率结算数据"""
+        if not hasattr(self, 'funding_manager') or not self.funding_manager:
+            logger.warning("资金费率管理器未初始化，跳过自动获取")
+            return
+        
+        try:
+            logger.info("后台任务: 开始自动获取资金费率结算数据...")
+            
+            result = await self.funding_manager.fetch_funding_settlement()
+            
+            if result['success']:
+                logger.info(f"✅ 后台自动获取成功！USDT合约数: {result['filtered_count']}, 权重: {result['weight_used']}")
+            else:
+                logger.error(f"❌ 后台自动获取失败: {result.get('error')}")
+                
+        except Exception as e:
+            logger.error(f"后台自动获取异常: {e}", exc_info=True)
+
 
 def main():
     """主函数"""
@@ -395,6 +426,6 @@ def main():
         logger.error(f"程序错误: {e}")
         sys.exit(1)
 
+
 if __name__ == "__main__":
     main()
-    
