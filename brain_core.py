@@ -4,7 +4,6 @@
 优化启动顺序：先启动HTTP服务，再启动保活，最后后台初始化WebSocket
 """
 
-import beijing_time
 import asyncio
 import logging
 import signal
