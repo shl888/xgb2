@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-大脑核心主控 - Render优化版（最新版）
+大脑核心主控 - Render优化版（最终版）
 """
 
 import asyncio
@@ -8,6 +8,7 @@ import logging
 import signal
 import sys
 import os
+import traceback  # ✅ 修复：添加这行
 from datetime import datetime
 
 # 设置路径
@@ -59,11 +60,8 @@ class BrainCore:
         self.running = False
         self.data_handlers = []
         
-        # ✅ 新增：初始化funding_manager属性
+        # 初始化funding_manager为None
         self.funding_manager = None
-        
-        # ✅ 关键：在__init__中注册路由（避免initialize()顺序问题）
-        self._setup_routes_early()
         
         # 注册脑回调
         data_store.set_brain_callback(self.receive_processed_data)
@@ -71,17 +69,6 @@ class BrainCore:
         # 信号处理
         signal.signal(signal.SIGINT, self.handle_signal)
         signal.signal(signal.SIGTERM, self.handle_signal)
-    
-    def _setup_routes_early(self):
-        """
-        在__init__中提前注册路由（解决方案）
-        这样即使initialize()内部初始化失败，路由也已经注册
-        """
-        try:
-            # 这里先创建临时的app引用，等initialize时再绑定
-            pass  # 实际注册在initialize()中完成
-        except Exception as e:
-            logger.warning(f"提前注册路由失败: {e}")
     
     async def receive_processed_data(self, processed_data):
         """接收过滤后的成品数据"""
@@ -93,13 +80,8 @@ class BrainCore:
         except Exception as e:
             logger.error(f"接收数据错误: {e}")
     
-    def add_data_handler(self, handler):
-        """添加数据处理器"""
-        self.data_handlers.append(handler)
-        logger.info(f"已添加数据处理器: {handler.__name__}")
-    
     async def initialize(self):
-        """初始化（调整顺序版）"""
+        """初始化（最终版）"""
         logger.info("=" * 60)
         logger.info("大脑核心启动中...")
         logger.info("=" * 60)
@@ -110,33 +92,31 @@ class BrainCore:
             logger.info(f"【1️⃣】创建HTTP服务器 (端口: {port})...")
             self.http_server = HTTPServer(host='0.0.0.0', port=port)
             
-            # 2. 启动HTTP服务器
-            logger.info("【2️⃣】启动HTTP服务器...")
+            # 2. ✅ 先注册路由（服务器启动前）
+            logger.info("【2️⃣】注册所有路由...")
+            from funding_settlement.api_routes import setup_funding_settlement_routes
+            setup_funding_settlement_routes(self.http_server.app)
+            
+            # 3. 再启动服务器
+            logger.info("【3️⃣】启动HTTP服务器...")
             await self.start_http_server()
             
-            # 3. 标记HTTP就绪（保活服务依赖）
+            # 4. 标记HTTP就绪
             data_store.set_http_server_ready(True)
             logger.info("✅ HTTP服务已就绪！")
             
-            # 4. 后台启动保活服务
-            logger.info("【3️⃣】启动后台保活服务...")
-            start_keep_alive_background()
-            
-            # 5. 初始化资金费率模块（最早）
+            # 5. 初始化资金费率管理器
             logger.info("【4️⃣】初始化资金费率管理器...")
             from funding_settlement import FundingSettlementManager
             self.funding_manager = FundingSettlementManager()
             
-            # 6. 注册路由（现在funding_manager已存在）
-            logger.info("【5️⃣】注册资金费率路由...")
-            from funding_settlement.api_routes import setup_funding_settlement_routes
-            setup_funding_settlement_routes(self.http_server.app)
+            # 6. 后台启动保活服务
+            logger.info("【5️⃣】后台启动保活服务...")
+            start_keep_alive_background()
             
-            # 7. 启动资金费率后台获取（等所有服务稳定后）
-            asyncio.create_task(self._delayed_funding_fetch())
-            
-            # 8. 延迟启动WebSocket（放在最后，最耗时）
+            # 7. 启动后台任务（延迟执行）
             asyncio.create_task(self._delayed_ws_init())
+            asyncio.create_task(self._delayed_funding_fetch())
             
             self.running = True
             logger.info("=" * 60)
@@ -146,7 +126,7 @@ class BrainCore:
             
         except Exception as e:
             logger.error(f"🚨 初始化失败: {e}")
-            logger.error(traceback.format_exc())
+            logger.error(traceback.format_exc())  # ✅ 现在不会报错了
             return False
     
     async def _delayed_ws_init(self):
@@ -160,7 +140,7 @@ class BrainCore:
             logger.error(f"WebSocket初始化失败: {e}")
     
     async def _delayed_funding_fetch(self):
-        """延迟5秒启动资金费率获取，确保funding_manager已就绪"""
+        """延迟5秒启动资金费率获取"""
         await asyncio.sleep(5)
         
         if not self.funding_manager:
@@ -199,9 +179,6 @@ class BrainCore:
             
             self.http_runner = runner
             logger.info(f"✅ HTTP服务器已启动: http://{host}:{port}")
-            logger.info(f"📍 健康检查: http://{host}:{port}/health")
-            logger.info(f"📍 资金费率(公共): http://{host}:{port}/funding/settlement/public")
-            logger.info(f"📍 资金费率(需密码): http://{host}:{port}/funding/settlement")
             
         except Exception as e:
             logger.error(f"启动HTTP服务器失败: {e}")
@@ -223,7 +200,6 @@ class BrainCore:
                 await asyncio.sleep(1)
                 check_counter += 1
                 
-                # 每30秒打印心跳
                 if check_counter % 30 == 0:
                     logger.info("💓 系统运行正常...")
         
