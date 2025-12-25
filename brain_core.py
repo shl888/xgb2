@@ -152,29 +152,32 @@ class BrainCore:
             logger.error(f"启动HTTP服务器失败: {e}")
             raise
     
-    async def _auto_fetch_funding_settlement(self):
-        """后台获取资金费率结算数据"""
-        # 等待HTTP完全就绪
-        await asyncio.sleep(10)
+        async def _auto_fetch_funding_settlement(self):
+        """后台获取资金费率结算数据 - 保证初始化完成"""
+        # 等待足够长时间，确保initialize()已经执行完
+        await asyncio.sleep(15)
         
-        # ✅ 修改检查方式：从 hasattr 改为直接判断
+        # 再次检查是否已经初始化
         if not self.funding_manager:
-            logger.warning("资金费率管理器未初始化，跳过自动获取")
+            logger.error("💥 错误：15秒后funding_manager仍为None")
+            logger.error("   可能原因：initialize()中初始化失败")
             return
         
+        logger.info("=" * 60)
+        logger.info("✅ 后台任务：funding_manager已就绪，开始获取数据")
+        logger.info("=" * 60)
+        
         try:
-            logger.info("=" * 60)
-            logger.info("后台任务: 开始获取资金费率结算数据...")
-            logger.info("=" * 60)
-            
             result = await self.funding_manager.fetch_funding_settlement()
             
             if result['success']:
-                logger.info(f"✅ 后台自动获取成功！USDT合约数: {result['filtered_count']}, 权重: {result['weight_used']}")
+                logger.info(f"🎉 后台自动获取成功！合约数: {result['filtered_count']}, 权重: {result['weight_used']}")
             else:
                 logger.error(f"❌ 后台自动获取失败: {result.get('error')}")
         except Exception as e:
-            logger.error(f"后台获取异常: {e}")
+            logger.error(f"💥 后台获取异常: {e}")
+            logger.error(traceback.format_exc())
+
     
     async def run(self):
         """主循环"""
