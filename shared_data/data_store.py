@@ -22,7 +22,7 @@ class DataStore:
         # 资金费率结算数据
         # 结构: {"binance": {"BTCUSDT": {"funding_rate": 0.0001, "funding_time": 1234567890000, ...}}}
         self.funding_settlement = {
-    "binance": {}
+            "binance": {}
 }
         
         # 账户数据
