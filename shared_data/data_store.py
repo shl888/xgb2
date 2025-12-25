@@ -18,6 +18,13 @@ class DataStore:
         # 格式：market_data[exchange][symbol][data_type] = data
         self.market_data = {}
         
+        
+        # 资金费率结算数据
+        # 结构: {"binance": {"BTCUSDT": {"funding_rate": 0.0001, "funding_time": 1234567890000, ...}}}
+        self.funding_settlement = {
+    "binance": {}
+}
+        
         # 账户数据
         self.account_data = {}
         # 订单数据
