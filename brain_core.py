@@ -58,7 +58,10 @@ class BrainCore:
         self.running = False
         self.data_handlers = []
         
-        # ✅ 注册回调（必须在receive_processed_data定义之后）
+        # ✅ 新增：初始化funding_manager为None
+        self.funding_manager = None
+        
+        # 注册回调
         data_store.set_brain_callback(self.receive_processed_data)
         
         signal.signal(signal.SIGINT, self.handle_signal)
@@ -86,7 +89,7 @@ class BrainCore:
             logger.info(f"【1️⃣】创建HTTP服务器配置...")
             self.http_server = HTTPServer(host='0.0.0.0', port=port)
             
-            # ✅ 在这里注册路由！（服务器启动前）
+            # ✅ 注册路由（服务器启动前）
             logger.info("【2️⃣】注册所有路由...")
             from funding_settlement.api_routes import setup_funding_settlement_routes
             setup_funding_settlement_routes(self.http_server.app)
@@ -154,8 +157,9 @@ class BrainCore:
         # 等待HTTP完全就绪
         await asyncio.sleep(10)
         
-        if not hasattr(self, 'funding_manager'):
-            logger.warning("资金费率管理器未初始化")
+        # ✅ 修改检查方式：从 hasattr 改为直接判断
+        if not self.funding_manager:
+            logger.warning("资金费率管理器未初始化，跳过自动获取")
             return
         
         try:
