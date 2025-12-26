@@ -412,7 +412,7 @@ class WebSocketConnection:
             logger.error(f"[{self.connection_id}] 处理消息错误: {e}")
     
     async def _process_binance_message(self, data):
-        """处理币安消息"""
+        """处理币安消息 - 完全保留原始数据，不做任何过滤"""
         # 订阅响应
         if "result" in data or "id" in data:
             return
@@ -430,17 +430,13 @@ class WebSocketConnection:
             if self.ticker_count % 100 == 0:
                 logger.info(f"[{self.connection_id}] 已处理 {self.ticker_count} 个ticker消息")
             
+            # 🚨 【关键修复】完全保留所有原始数据，不进行过滤
             processed = {
                 "exchange": "binance",
                 "symbol": symbol,
                 "data_type": "ticker",
-                "price_change_percent": float(data.get("P", 0)),
-                "last_price": float(data.get("c", 0)),
-                "volume": float(data.get("v", 0)),
-                "quote_volume": float(data.get("q", 0)),
-                "high_price": float(data.get("h", 0)),
-                "low_price": float(data.get("l", 0)),
-                "event_time": data.get("E", 0),
+                "event_type": event_type,
+                "raw_data": data,  # 完整的原始数据
                 "timestamp": datetime.now().isoformat()
             }
             
@@ -459,14 +455,13 @@ class WebSocketConnection:
                 except Exception as e:
                     logger.debug(f"收集币安合约失败 {symbol}: {e}")
             
+            # 🚨 【关键修复】完全保留原始标记价格数据
             processed = {
                 "exchange": "binance",
                 "symbol": symbol,
                 "data_type": "mark_price",
-                "mark_price": float(data.get("p", 0)),
-                "funding_rate": float(data.get("r", 0)),
-                "next_funding_time": data.get("T", 0),
-                "event_time": data.get("E", 0),
+                "event_type": event_type,
+                "raw_data": data,  # 完整的原始数据
                 "timestamp": datetime.now().isoformat()
             }
             
@@ -476,7 +471,7 @@ class WebSocketConnection:
                 logger.error(f"[{self.connection_id}] 数据回调失败: {e}")
     
     async def _process_okx_message(self, data):
-        """处理欧意消息"""
+        """处理欧意消息 - 完全保留原始数据，不做任何过滤"""
         if data.get("event"):
             event_type = data.get("event")
             if event_type == "error":
@@ -502,19 +497,20 @@ class WebSocketConnection:
                         except Exception as e:
                             logger.debug(f"收集OKX合约失败 {processed_symbol}: {e}")
                     
-                    # 🚨 【关键修复】记录哪个连接收到的数据
-                    funding_rate = float(funding_data.get("fundingRate", 0))
-                    logger.info(f"[{self.connection_id}] 收到资金费率: {processed_symbol}={funding_rate:.6f}")
+                    # 🚨 【关键修复】记录哪个连接收到的数据，但保留完整原始数据
+                    if "fundingRate" in funding_data:
+                        funding_rate = float(funding_data.get("fundingRate", 0))
+                        logger.info(f"[{self.connection_id}] 收到资金费率: {processed_symbol}={funding_rate:.6f}")
                     
+                    # 🚨 【关键修复】完全保留原始资金费率数据
                     processed = {
                         "exchange": "okx",
                         "symbol": processed_symbol,
                         "data_type": "funding_rate",
-                        "funding_rate": funding_rate,
-                        "next_funding_time": funding_data.get("fundingTime", ""),
-                        "mark_price": float(funding_data.get("markPx", 0)),
-                        "timestamp": datetime.now().isoformat(),
-                        "original_symbol": symbol
+                        "channel": channel,
+                        "raw_data": data,  # 完整的原始数据
+                        "original_symbol": symbol,
+                        "timestamp": datetime.now().isoformat()
                     }
                     try:
                         await self.data_callback(processed)
@@ -523,8 +519,6 @@ class WebSocketConnection:
                     
             elif channel == "tickers":
                 if data.get("data") and len(data["data"]) > 0:
-                    ticker_data = data["data"][0]
-                    
                     # 🚨 【关键修复】每个连接独立的计数器
                     self.okx_ticker_count += 1
                     
@@ -533,25 +527,22 @@ class WebSocketConnection:
                         logger.info(f"[{self.connection_id}] 已处理 {self.okx_ticker_count} 个OKX ticker")
                     
                     processed_symbol = symbol.replace('-USDT-SWAP', 'USDT')
+                    
+                    # 🚨 【关键修复】完全保留原始ticker数据
                     processed = {
                         "exchange": "okx",
                         "symbol": processed_symbol,
                         "data_type": "ticker",
-                        "price_change_percent": float(ticker_data.get("sodUtc8", 0)),
-                        "last_price": float(ticker_data.get("last", 0)),
-                        "volume": float(ticker_data.get("volCcy24h", 0)),
-                        "quote_volume": float(ticker_data.get("vol24h", 0)),
-                        "high_price": float(ticker_data.get("high24h", 0)),
-                        "low_price": float(ticker_data.get("low24h", 0)),
-                        "timestamp": ticker_data.get("ts", ""),
-                        "processed_time": datetime.now().isoformat(),
-                        "original_symbol": symbol
+                        "channel": channel,
+                        "raw_data": data,  # 完整的原始数据
+                        "original_symbol": symbol,
+                        "timestamp": datetime.now().isoformat()
                     }
                     try:
                         await self.data_callback(processed)
                     except Exception as e:
                         logger.error(f"[{self.connection_id}] 数据回调失败: {e}")
-                    
+        
         except Exception as e:
             logger.warning(f"[{self.connection_id}] 解析OKX数据失败: {e}")
     
