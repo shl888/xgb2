@@ -22,11 +22,12 @@ from .static_symbols import STATIC_SYMBOLS  # 导入静态合约
 
 logger = logging.getLogger(__name__)
 
-# ============ 【修复：默认数据回调函数】============
+# ============ 【修复：默认数据回调函数 - 支持原始数据】============
 async def default_data_callback(data):
     """
-    默认数据回调函数 - 将WebSocket接收的数据直接存入共享存储
+    默认数据回调函数 - 将WebSocket接收的原始数据直接存入共享存储
     这是数据流的关键节点：WebSocket → 此函数 → data_store
+    现在data包含完整的raw_data字段
     """
     try:
         # 验证数据有效性
@@ -45,12 +46,13 @@ async def default_data_callback(data):
         
         # ✅【关键修复】直接调用 data_store.update_market_data
         # 传递三个参数：exchange, symbol, data
+        # 现在data包含完整的raw_data字段和原始数据
         await data_store.update_market_data(exchange, symbol, data)
         
         # 记录日志（每100条记录一次，避免日志过多）
         default_data_callback.counter = getattr(default_data_callback, 'counter', 0) + 1
         if default_data_callback.counter % 100 == 0:
-            logger.info(f"[数据回调] 已处理 {default_data_callback.counter} 条数据，最新: {exchange} {symbol}")
+            logger.info(f"[数据回调] 已处理 {default_data_callback.counter} 条原始数据，最新: {exchange} {symbol}")
             
     except TypeError as e:
         # 如果参数错误，记录详细错误信息
@@ -76,9 +78,9 @@ class WebSocketPoolManager:
             self.data_callback = data_callback
             logger.info(f"WebSocketPoolManager 使用自定义数据回调")
         else:
-            # 使用我们修复的默认回调
+            # 使用我们修复的默认回调（支持原始数据）
             self.data_callback = default_data_callback
-            logger.info(f"WebSocketPoolManager 使用默认数据回调（直接对接共享数据模块）")
+            logger.info(f"WebSocketPoolManager 使用默认数据回调（直接对接共享数据模块，支持原始数据）")
         
         self.exchange_pools = {}  # exchange_name -> ExchangeWebSocketPool
         self.initialized = False
