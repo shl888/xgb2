@@ -156,7 +156,7 @@ class BrainCore:
     async def _start_pipeline(self):
         """启动数据处理流水线"""
         try:
-            from .pipeline_starter import PipelineStarter
+            from shared_data.pipeline_starter import PipelineStarter
             
             # 创建并启动流水线
             self.pipeline_starter = PipelineStarter(self.receive_processed_data)
