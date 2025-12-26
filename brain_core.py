@@ -8,7 +8,7 @@ import logging
 import signal
 import sys
 import os
-import traceback  # ✅ 修复：添加这行
+import traceback
 from datetime import datetime
 
 # 设置路径
@@ -63,22 +63,42 @@ class BrainCore:
         # 初始化funding_manager为None
         self.funding_manager = None
         
-        # 注册脑回调
-        data_store.set_brain_callback(self.receive_processed_data)
+        # ✅ 修改1：移除旧的回调设置
+        # data_store.set_brain_callback(self.receive_processed_data)  # 删除这行
+        
+        # ✅ 新增：流水线启动器
+        self.pipeline_starter = None
         
         # 信号处理
         signal.signal(signal.SIGINT, self.handle_signal)
         signal.signal(signal.SIGTERM, self.handle_signal)
     
     async def receive_processed_data(self, processed_data):
-        """接收过滤后的成品数据"""
+        """
+        接收Step5推送的成品数据（简化版）
+        只确认收到数据，不做其他处理
+        """
         try:
-            data_type = processed_data.get('type', 'unknown')
-            exchange = processed_data.get('exchange', 'unknown')
-            symbol = processed_data.get('symbol', 'unknown')
-            logger.info(f"🧠 收到数据: {exchange}:{symbol} ({data_type})")
+            symbol = processed_data.get('symbol', 'UNKNOWN')
+            timestamp = processed_data.get('timestamp', '')
+            
+            # ✅ 简单记录：只确认收到数据
+            print(f"🧠 收到成品数据: {symbol} at {timestamp}")
+            
+            # 可选：记录到日志（每10条记录一次）
+            receive_processed_data.counter = getattr(receive_processed_data, 'counter', 0) + 1
+            if receive_processed_data.counter % 10 == 0:
+                # 提取关键信息用于日志
+                price_diff = processed_data.get('calculations', {}).get('price_diff')
+                rate_diff = processed_data.get('calculations', {}).get('rate_diff')
+                logger.info(f"[数据接收] 已收到 {receive_processed_data.counter} 条成品数据，"
+                          f"最新: {symbol}, 价格差: {price_diff}, 费率差: {rate_diff}")
+            
         except Exception as e:
             logger.error(f"接收数据错误: {e}")
+            # 记录错误数据前几个字符用于调试
+            data_str = str(processed_data)[:100] if processed_data else "无数据"
+            logger.error(f"错误数据样本: {data_str}...")
     
     async def initialize(self):
         """初始化（最终版）"""
@@ -114,6 +134,10 @@ class BrainCore:
             logger.info("【5️⃣】后台启动保活服务...")
             start_keep_alive_background()
             
+            # ✅ 修改2：启动数据处理流水线
+            logger.info("【6️⃣】启动数据处理流水线...")
+            await self._start_pipeline()
+            
             # 7. 启动后台任务（延迟执行）
             asyncio.create_task(self._delayed_ws_init())
             asyncio.create_task(self._delayed_funding_fetch())
@@ -126,8 +150,29 @@ class BrainCore:
             
         except Exception as e:
             logger.error(f"🚨 初始化失败: {e}")
-            logger.error(traceback.format_exc())  # ✅ 现在不会报错了
+            logger.error(traceback.format_exc())
             return False
+    
+    async def _start_pipeline(self):
+        """启动数据处理流水线"""
+        try:
+            from .pipeline_starter import PipelineStarter
+            
+            # 创建并启动流水线
+            self.pipeline_starter = PipelineStarter(self.receive_processed_data)
+            success = await self.pipeline_starter.start()
+            
+            if success:
+                logger.info("✅ 数据处理流水线启动成功")
+                logger.info("📡 等待接收Step5推送的成品数据...")
+            else:
+                logger.error("❌ 数据处理流水线启动失败")
+                
+        except ImportError as e:
+            logger.error(f"导入流水线模块失败: {e}")
+            logger.info("⚠️  将使用旧的数据处理方式")
+        except Exception as e:
+            logger.error(f"启动流水线异常: {e}")
     
     async def _delayed_ws_init(self):
         """延迟10秒启动WebSocket，确保其他服务已就绪"""
@@ -193,6 +238,7 @@ class BrainCore:
                 return
             
             logger.info("🚀 大脑核心运行中...")
+            logger.info("📊 数据流：WebSocket → 5步流水线 → 大脑（本程序）")
             logger.info("🛑 按 Ctrl+C 停止")
             
             check_counter = 0
@@ -200,8 +246,12 @@ class BrainCore:
                 await asyncio.sleep(1)
                 check_counter += 1
                 
+                # 每30秒显示状态
                 if check_counter % 30 == 0:
-                    logger.info("💓 系统运行正常...")
+                    status_msg = "💓 系统运行正常"
+                    if self.pipeline_starter and self.pipeline_starter.running:
+                        status_msg += " | 流水线运行中"
+                    logger.info(status_msg)
         
         except KeyboardInterrupt:
             logger.info("收到键盘中断")
@@ -222,6 +272,10 @@ class BrainCore:
         logger.info("正在关闭大脑核心...")
         
         try:
+            # ✅ 修改3：关闭流水线
+            if self.pipeline_starter:
+                await self.pipeline_starter.stop()
+                
             if hasattr(self, 'ws_admin') and self.ws_admin:
                 await self.ws_admin.stop()
             if hasattr(self, 'http_runner') and self.http_runner:
@@ -255,3 +309,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
