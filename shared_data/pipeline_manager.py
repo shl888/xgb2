@@ -1,25 +1,26 @@
 """
-PipelineManager 智能版 - 动态队列 + 内存感知
-功能：自动平衡内存与吞吐量
+PipelineManager 智能版 - 完整实现
+包含：批量处理 + 内存监控 + Step4缓存监控
 """
 
 import asyncio
 from enum import Enum
-from typing import Dict, Any, List, Optional, Callable
-from datetime import datetime
+from typing import Dict, Any, Optional, Callable
 import logging
 import time
 from dataclasses import dataclass
 
-# 导入内存监控
-import psutil  # 需要 pip install psutil
-
-# 5个步骤
+# 5个步骤 + 内存监控
 from shared_data.step1_filter import Step1Filter
 from shared_data.step2_fusion import Step2Fusion
 from shared_data.step3_align import Step3Align
 from shared_data.step4_calc import Step4Calc
 from shared_data.step5_cross_calc import Step5CrossCalc
+
+try:
+    import psutil  # 可选依赖，用于内存监控
+except ImportError:
+    psutil = None
 
 logger = logging.getLogger(__name__)
 
@@ -30,14 +31,14 @@ class DataType(Enum):
 @dataclass
 class PipelineConfig:
     """智能版配置"""
-    queue_max_size: int = 5000           # ✅ 上限5000（约300MB）
+    queue_max_size: int = 5000           # 上限5000（约300MB）
     processing_timeout: float = 1.0
     batch_size: int = 10
     log_interval: int = 60
-    memory_safe_threshold: float = 70.0  # ✅ 新增：内存安全阈值70%
+    memory_safe_threshold: float = 70.0  # 内存安全阈值70%
 
 class PipelineManager:
-    """智能版 - 内存感知 + 动态队列"""
+    """智能版 - 完整实现"""
     
     _instance: Optional['PipelineManager'] = None
     
@@ -75,7 +76,7 @@ class PipelineManager:
             'account_processed': 0,
             'errors': 0,
             'batches_processed': 0,
-            'dropped_due_to_memory': 0,  # ✅ 新增：因内存丢弃计数
+            'dropped_due_to_memory': 0,
             'start_time': time.time()
         }
         
@@ -83,11 +84,13 @@ class PipelineManager:
         self.queue = asyncio.Queue(maxsize=self.config.queue_max_size)
         self._step1_buffer: List[Any] = []
         
-        logger.info(f"✅ 智能版PipelineManager初始化完成 (动态队列: {self.config.queue_max_size})")
+        logger.info(f"✅ 智能版PipelineManager初始化完成 (队列上限: {self.config.queue_max_size})")
         self._initialized = True
     
     def _get_memory_usage_percent(self) -> float:
         """获取当前内存使用率"""
+        if psutil is None:
+            return 0.0
         try:
             return psutil.virtual_memory().percent
         except:
@@ -99,19 +102,22 @@ class PipelineManager:
         return usage < self.config.memory_safe_threshold
     
     async def start(self):
+        """启动所有后台任务"""
         if self.running:
             return
         
         logger.info("🚀 智能版PipelineManager启动...")
         self.running = True
         
+        # ✅ 启动3个后台任务
         asyncio.create_task(self._consumer_loop())
-        asyncio.create_task(self._cache_monitor_loop())
-        asyncio.create_task(self._memory_monitor_loop())  # ✅ 新增：内存监控
+        asyncio.create_task(self._memory_monitor_loop())
+        asyncio.create_task(self._periodic_log_loop())
         
-        logger.info("✅ 消费者循环已启动")
+        logger.info("✅ 消费者循环 + 监控任务已启动")
     
     async def stop(self):
+        """优雅停止"""
         logger.info("🛑 PipelineManager停止中...")
         self.running = False
         
@@ -126,14 +132,9 @@ class PipelineManager:
         logger.info("✅ PipelineManager已停止")
     
     async def ingest_data(self, data: Dict[str, Any]) -> bool:
-        """
-        智能入队：
-        - 队列未满：直接入队
-        - 队列满了但内存安全：扩容入队（丢弃最老数据）
-        - 队列满了且内存危险：拒绝入队
-        """
+        """智能入队（带内存感知）"""
         try:
-            # 1. 快速分类
+            # 分类
             data_type = data.get("data_type", "")
             if data_type.startswith(("ticker", "funding_rate", "mark_price",
                                    "okx_", "binance_")):
@@ -149,52 +150,34 @@ class PipelineManager:
                 "timestamp": time.time()
             }
             
-            # 2. 尝试直接入队
+            # 尝试直接入队
             try:
                 self.queue.put_nowait(queue_item)
                 return True
             except asyncio.QueueFull:
-                pass  # 队列满了，进入智能处理
+                pass
             
-            # 3. 内存检查
+            # 内存检查
             if not self._is_memory_safe():
                 logger.warning(f"⚠️ 内存危险({self._get_memory_usage_percent():.1f}%)，拒绝数据")
                 self.counters['dropped_due_to_memory'] += 1
                 return False
             
-            # 4. 队列满但内存安全：尝试丢弃最老的数据，然后入队
+            # 丢弃老数据后入队
             try:
-                # 丢弃最老的一条
-                self.queue.get_nowait()
+                self.queue.get_nowait()  # 丢弃最老一条
                 self.queue.put_nowait(queue_item)
                 logger.debug(f"🔄 队列满，丢弃老数据后入队: {data.get('symbol', 'N/A')}")
                 return True
             except:
-                return False  # 还是失败
+                return False
             
         except Exception as e:
             logger.error(f"入队失败: {e}")
             return False
     
-    async def _memory_monitor_loop(self):
-        """内存监控循环（每10秒检查）"""
-        while self.running:
-            try:
-                await asyncio.sleep(10)
-                
-                mem_usage = self._get_memory_usage_percent()
-                queue_size = self.queue.qsize()
-                
-                if mem_usage > self.config.memory_safe_threshold:
-                    logger.warning(f"⚠️ 内存压力高: {mem_usage:.1f}% | 队列: {queue_size}")
-                
-                if queue_size > self.config.queue_max_size * 0.8:
-                    logger.warning(f"⚠️ 队列堆积: {queue_size}/{self.config.queue_max_size}")
-                
-            except Exception as e:
-                logger.error(f"内存监控异常: {e}")
-    
     async def _consumer_loop(self):
+        """核心消费者循环"""
         logger.info("🔄 消费者循环启动（批量处理 + 内存感知）...")
         
         while self.running:
@@ -216,6 +199,7 @@ class PipelineManager:
                 await asyncio.sleep(0.1)
     
     async def _process_single_item(self, item: Dict[str, Any]):
+        """单条数据处理"""
         category = item["category"]
         raw_data = item["data"]
         
@@ -276,13 +260,50 @@ class PipelineManager:
             self.counters['errors'] += 1
     
     async def _process_account_data(self, data: Dict[str, Any]):
+        """账户数据直连大脑"""
         if self.brain_callback:
             await self.brain_callback(data)
         
         self.counters['account_processed'] += 1
         logger.debug(f"💰 账户数据直达: {data.get('exchange', 'N/A')}")
     
+    async def _memory_monitor_loop(self):
+        """内存监控循环（每10秒）"""
+        while self.running:
+            try:
+                await asyncio.sleep(10)
+                
+                mem_usage = self._get_memory_usage_percent()
+                queue_size = self.queue.qsize()
+                
+                if mem_usage > self.config.memory_safe_threshold:
+                    logger.warning(f"⚠️ 内存压力高: {mem_usage:.1f}% | 队列: {queue_size}")
+                
+                if queue_size > self.config.queue_max_size * 0.8:
+                    logger.warning(f"⚠️ 队列堆积: {queue_size}/{self.config.queue_max_size}")
+                
+            except Exception as e:
+                logger.error(f"内存监控异常: {e}")
+    
+    async def _periodic_log_loop(self):
+        """定期日志循环"""
+        while self.running:
+            try:
+                await asyncio.sleep(self.config.log_interval)
+                
+                status = self.get_status()
+                logger.info("="*60)
+                logger.info(f"📊 流水线运行报告（运行: {int(status['uptime_seconds'])}秒）")
+                logger.info(f"处理量: 市场={status['market_processed']} | 账户={status['account_processed']}")
+                logger.info(f"批量数: {status['batches_processed']} | 错误: {status['errors']}")
+                logger.info(f"队列: {status['queue_size']}/{self.config.queue_max_size} | 内存: {status['memory_usage_percent']:.1f}%")
+                logger.info("="*60)
+                
+            except Exception as e:
+                logger.error(f"日志循环异常: {e}")
+    
     def get_status(self) -> Dict[str, Any]:
+        """获取完整状态"""
         uptime = time.time() - self.counters['start_time']
         mem_usage = self._get_memory_usage_percent()
         return {
