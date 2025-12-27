@@ -11,6 +11,12 @@ import os
 import traceback
 from datetime import datetime
 
+# ============= 加在这里（第10行，所有import之后） =============
+sys.path.append("./config")
+from config.log_control import setup_all_loggers
+setup_all_loggers()  # ✅ 只加这1行！配置所有日志
+# ===========================================================
+
 # 设置路径
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
