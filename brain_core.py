@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-大脑核心主控 - Render优化版（最终版）
+大脑核心主控 - PipelineManager集成版
 """
 
 import asyncio
@@ -8,7 +8,7 @@ import logging
 import signal
 import sys
 import os
-import traceback  # ✅ 修复：添加这行
+import traceback
 from datetime import datetime
 
 # 设置路径
@@ -19,6 +19,7 @@ if BASE_DIR not in sys.path:
 from websocket_pool.admin import WebSocketAdmin
 from http_server.server import HTTPServer
 from shared_data.data_store import data_store
+from shared_data.pipeline_manager import PipelineManager, PipelineConfig  # 新增导入
 
 logger = logging.getLogger(__name__)
 
@@ -58,30 +59,59 @@ class BrainCore:
         self.http_server = None
         self.http_runner = None
         self.running = False
-        self.data_handlers = []
         
-        # 初始化funding_manager为None
+        # 流水线管理员
+        self.pipeline_manager = None
+        
+        # 资金费率管理器
         self.funding_manager = None
         
-        # 注册脑回调
+        # 注册脑回调到data_store
         data_store.set_brain_callback(self.receive_processed_data)
         
         # 信号处理
         signal.signal(signal.SIGINT, self.handle_signal)
         signal.signal(signal.SIGTERM, self.handle_signal)
     
-    async def receive_processed_data(self, processed_data):
-        """接收过滤后的成品数据"""
+    async def receive_processed_data(self, processed_data: dict):
+        """接收流水线处理后的成品数据（增强版）"""
         try:
-            data_type = processed_data.get('type', 'unknown')
+            data_type = processed_data.get('data_type', 'unknown')
             exchange = processed_data.get('exchange', 'unknown')
             symbol = processed_data.get('symbol', 'unknown')
-            logger.info(f"🧠 收到数据: {exchange}:{symbol} ({data_type})")
+            
+            # 打印接收到的数据摘要
+            if data_type.startswith('cross_platform'):
+                # 跨平台套利数据
+                logger.info(f"🎯 套利数据: {exchange}:{symbol} | 价差: {processed_data.get('price_diff', 0):.6f}")
+                # 在这里可以触发交易逻辑
+                
+            elif data_type.startswith('account_'):
+                # 账户数据
+                logger.info(f"💰 账户更新: {exchange} | 类型: {data_type}")
+                # 在这里更新账户状态
+                
+            elif data_type == 'order':
+                # 订单数据
+                status = processed_data.get('payload', {}).get('status', 'unknown')
+                logger.info(f"📝 订单更新: {exchange}:{symbol} | 状态: {status}")
+                # 在这里更新订单状态
+                
+            elif data_type in ['ticker', 'funding_rate', 'mark_price']:
+                # 市场数据（显示但不频繁打印）
+                price = processed_data.get('payload', {}).get('latest_price', 0)
+                if symbol in ['BTCUSDT', 'ETHUSDT']:  # 只打印重要币种
+                    logger.debug(f"📊 市场数据: {exchange}:{symbol} | 价格: {price}")
+                    
+            else:
+                logger.debug(f"📨 收到数据: {exchange}:{symbol} | 类型: {data_type}")
+                
         except Exception as e:
             logger.error(f"接收数据错误: {e}")
+            logger.debug(f"错误数据: {processed_data}")
     
     async def initialize(self):
-        """初始化（最终版）"""
+        """初始化（PipelineManager集成版）"""
         logger.info("=" * 60)
         logger.info("大脑核心启动中...")
         logger.info("=" * 60)
@@ -92,12 +122,12 @@ class BrainCore:
             logger.info(f"【1️⃣】创建HTTP服务器 (端口: {port})...")
             self.http_server = HTTPServer(host='0.0.0.0', port=port)
             
-            # 2. ✅ 先注册路由（服务器启动前）
+            # 2. 注册路由
             logger.info("【2️⃣】注册所有路由...")
             from funding_settlement.api_routes import setup_funding_settlement_routes
             setup_funding_settlement_routes(self.http_server.app)
             
-            # 3. 再启动服务器
+            # 3. 启动HTTP服务器
             logger.info("【3️⃣】启动HTTP服务器...")
             await self.start_http_server()
             
@@ -105,18 +135,42 @@ class BrainCore:
             data_store.set_http_server_ready(True)
             logger.info("✅ HTTP服务已就绪！")
             
-            # 5. 初始化资金费率管理器
-            logger.info("【4️⃣】初始化资金费率管理器...")
+            # 5. **初始化并启动流水线管理员（新增）**
+            logger.info("【4️⃣】初始化流水线管理员...")
+            config = PipelineConfig(
+                step1_batch_size=20,
+                step2_batch_size=30,
+                step3_batch_size=30,
+                step4_batch_size=50,
+                enable_monitoring=True  # 启用监控
+            )
+            
+            self.pipeline_manager = PipelineManager(
+                brain_callback=self.receive_processed_data,  # 设置回调
+                config=config
+            )
+            
+            # 启动流水线
+            await self.pipeline_manager.start()
+            logger.info("✅ 流水线管理员启动完成！")
+            
+            # 6. **让data_store引用流水线管理员（双向连接）**
+            data_store.pipeline_manager = self.pipeline_manager
+            logger.info("✅ DataStore ↔ PipelineManager 连接建立")
+            
+            # 7. 初始化资金费率管理器
+            logger.info("【5️⃣】初始化资金费率管理器...")
             from funding_settlement import FundingSettlementManager
             self.funding_manager = FundingSettlementManager()
             
-            # 6. 后台启动保活服务
-            logger.info("【5️⃣】后台启动保活服务...")
+            # 8. 后台启动保活服务
+            logger.info("【6️⃣】后台启动保活服务...")
             start_keep_alive_background()
             
-            # 7. 启动后台任务（延迟执行）
+            # 9. 启动后台任务（延迟执行）
             asyncio.create_task(self._delayed_ws_init())
             asyncio.create_task(self._delayed_funding_fetch())
+            asyncio.create_task(self._monitor_pipeline())  # 新增：监控流水线
             
             self.running = True
             logger.info("=" * 60)
@@ -126,8 +180,32 @@ class BrainCore:
             
         except Exception as e:
             logger.error(f"🚨 初始化失败: {e}")
-            logger.error(traceback.format_exc())  # ✅ 现在不会报错了
+            logger.error(traceback.format_exc())
             return False
+    
+    async def _monitor_pipeline(self):
+        """监控流水线状态"""
+        await asyncio.sleep(15)  # 等待流水线稳定
+        
+        while self.running:
+            try:
+                if self.pipeline_manager:
+                    # 获取流水线状态报告
+                    report = self.pipeline_manager.get_pipeline_report()
+                    
+                    # 每30秒打印一次摘要
+                    logger.info(f"📈 流水线状态: {report.get('total_processed', 0)}条已处理")
+                    logger.info(f"   成功率: {report.get('success_rate', 0):.1%}")
+                    logger.info(f"   当前队列: {report.get('queue_size', 0)}条")
+                    
+                    # 检查异常
+                    if report.get('success_rate', 0) < 0.8:
+                        logger.warning("⚠️  流水线成功率较低，请检查")
+                    
+            except Exception as e:
+                logger.error(f"监控流水线失败: {e}")
+            
+            await asyncio.sleep(30)  # 每30秒检查一次
     
     async def _delayed_ws_init(self):
         """延迟10秒启动WebSocket，确保其他服务已就绪"""
@@ -200,8 +278,13 @@ class BrainCore:
                 await asyncio.sleep(1)
                 check_counter += 1
                 
-                if check_counter % 30 == 0:
-                    logger.info("💓 系统运行正常...")
+                # 每60秒打印一次系统状态
+                if check_counter % 60 == 0:
+                    # 获取系统状态
+                    ws_status = self.ws_admin.get_status() if hasattr(self.ws_admin, 'get_status') else "unknown"
+                    pipeline_status = "running" if self.pipeline_manager else "stopped"
+                    
+                    logger.info("💓 系统状态: WS=" + ws_status + " | Pipeline=" + pipeline_status)
         
         except KeyboardInterrupt:
             logger.info("收到键盘中断")
@@ -222,10 +305,19 @@ class BrainCore:
         logger.info("正在关闭大脑核心...")
         
         try:
+            # 关闭流水线
+            if hasattr(self, 'pipeline_manager') and self.pipeline_manager:
+                await self.pipeline_manager.stop()
+                logger.info("✅ 流水线已关闭")
+                
             if hasattr(self, 'ws_admin') and self.ws_admin:
                 await self.ws_admin.stop()
+                logger.info("✅ WebSocket已关闭")
+                
             if hasattr(self, 'http_runner') and self.http_runner:
                 await self.http_runner.cleanup()
+                logger.info("✅ HTTP服务器已关闭")
+                
             logger.info("✅ 大脑核心已关闭")
         except Exception as e:
             logger.error(f"关闭出错: {e}")
