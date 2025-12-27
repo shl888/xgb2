@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-大脑核心主控 - Render降压版（512MB内存优化）
+大脑核心主控 - Render流式终极版（512MB内存优化）
 """
 
 import asyncio
@@ -19,7 +19,7 @@ if BASE_DIR not in sys.path:
 from websocket_pool.admin import WebSocketAdmin
 from http_server.server import HTTPServer
 from shared_data.data_store import data_store
-from shared_data.pipeline_manager import PipelineManager, PipelineConfig  # 导入降压版
+from shared_data.pipeline_manager import PipelineManager  # ✅ 删除 PipelineConfig
 
 logger = logging.getLogger(__name__)
 
@@ -72,21 +72,18 @@ class BrainCore:
             exchange = processed_data.get('exchange', 'unknown')
             symbol = processed_data.get('symbol', 'unknown')
             
-            # 区分数据类型
             if data_type.startswith('account_') or data_type in ['order', 'trade']:
                 logger.info(f"💰 账户/订单数据: {exchange}.{symbol} ({data_type})")
-                # 在这里处理账户数据（更新UI、触发策略等）
             else:
                 logger.info(f"📊 市场套利数据: {exchange}.{symbol} ({data_type})")
-                # 处理市场数据（套利计算、下单等）
                 
         except Exception as e:
             logger.error(f"接收数据错误: {e}")
     
     async def initialize(self):
-        """初始化 - 降压版"""
+        """初始化 - 流式终极版"""
         logger.info("=" * 60)
-        logger.info("大脑核心启动中（降压版，512MB优化）...")
+        logger.info("大脑核心启动中（流式终极版，512MB优化）...")
         logger.info("=" * 60)
         
         try:
@@ -106,12 +103,11 @@ class BrainCore:
             data_store.set_http_server_ready(True)
             logger.info("✅ HTTP服务已就绪！")
             
-            # 4. 初始化并启动流水线管理员（降压版）
-            logger.info("【4️⃣】初始化PipelineManager（降压版）...")
-            config = PipelineConfig()
+            # 4. 初始化PipelineManager（流式版，无需配置）
+            logger.info("【4️⃣】初始化PipelineManager（流式终极版）...")
+            # ✅ 删除 PipelineConfig，直接传回调
             self.pipeline_manager = PipelineManager(
-                brain_callback=self.receive_processed_data,
-                config=config
+                brain_callback=self.receive_processed_data
             )
             await self.pipeline_manager.start()
             logger.info("✅ 流水线管理员启动完成！")
@@ -129,7 +125,7 @@ class BrainCore:
             
             self.running = True
             logger.info("=" * 60)
-            logger.info("🚀 大脑核心启动完成！（降压版）")
+            logger.info("🚀 大脑核心启动完成！（流式终极版）")
             logger.info("=" * 60)
             return True
             
@@ -169,7 +165,7 @@ class BrainCore:
             raise
     
     async def run(self):
-        """主循环 - 降压版"""
+        """主循环 - 流式版"""
         try:
             success = await self.initialize()
             if not success:
@@ -177,7 +173,7 @@ class BrainCore:
                 return
             
             logger.info("=" * 60)
-            logger.info("🚀 大脑核心运行中（512MB降压版）...")
+            logger.info("🚀 大脑核心运行中（流式终极版，512MB优化）...")
             logger.info("🛑 按 Ctrl+C 停止")
             logger.info("=" * 60)
             
@@ -198,7 +194,7 @@ class BrainCore:
         self.running = False
     
     async def shutdown(self):
-        """优雅关闭 - 降压版"""
+        """优雅关闭"""
         self.running = False
         logger.info("正在关闭大脑核心...")
         
@@ -215,12 +211,12 @@ class BrainCore:
             if hasattr(self, 'http_runner') and self.http_runner:
                 await self.http_runner.cleanup()
             
-            logger.info("✅ 大脑核心已关闭（降压版）")
+            logger.info("✅ 大脑核心已关闭（流式终极版）")
         except Exception as e:
             logger.error(f"关闭出错: {e}")
 
 def main():
-    """主函数 - 降压版"""
+    """主函数"""
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
