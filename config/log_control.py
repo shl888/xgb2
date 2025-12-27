@@ -10,7 +10,7 @@ import os
 # ============== 在这里改（唯一需要修改的地方） ==============
 # 全局日志级别：debug/info/warning/error
 # 生产环境设 "warning"，调试设 "info"，深度调试设 "debug"
-GLOBAL_LOG_LEVEL = "warning"  # ✅ 改这里
+GLOBAL_LOG_LEVEL = "info"  # ✅ 改这里
 
 # 各模块日志级别（想开哪个就把"warning"改成"info"或"debug"）
 MODULE_LEVELS = {
