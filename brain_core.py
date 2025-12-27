@@ -108,10 +108,7 @@ class BrainCore:
             
             # 4. 初始化并启动流水线管理员（降压版）
             logger.info("【4️⃣】初始化PipelineManager（降压版）...")
-            config = PipelineConfig(
-                queue_max_size=500,      # ✅ 仅使用降压版参数
-                # 所有stepX_batch_size等参数已删除
-            )
+            config = PipelineConfig()
             self.pipeline_manager = PipelineManager(
                 brain_callback=self.receive_processed_data,
                 config=config
