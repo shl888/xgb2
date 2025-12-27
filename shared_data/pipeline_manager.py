@@ -1,6 +1,6 @@
 """
-PipelineManager 调优版 - 批量处理 + 背压控制
-功能：隔10条批量跑一次Step2-5，大幅降低CPU开销
+PipelineManager 智能版 - 动态队列 + 内存感知
+功能：自动平衡内存与吞吐量
 """
 
 import asyncio
@@ -10,6 +10,9 @@ from datetime import datetime
 import logging
 import time
 from dataclasses import dataclass
+
+# 导入内存监控
+import psutil  # 需要 pip install psutil
 
 # 5个步骤
 from shared_data.step1_filter import Step1Filter
@@ -26,14 +29,15 @@ class DataType(Enum):
 
 @dataclass
 class PipelineConfig:
-    """调优版配置"""
-    queue_max_size: int = 1000           # ✅ 增大到1000（内存仍然安全）
+    """智能版配置"""
+    queue_max_size: int = 5000           # ✅ 上限5000（约300MB）
     processing_timeout: float = 1.0
-    batch_size: int = 10                 # ✅ 新增：每10条批量处理一次
+    batch_size: int = 10
     log_interval: int = 60
+    memory_safe_threshold: float = 70.0  # ✅ 新增：内存安全阈值70%
 
 class PipelineManager:
-    """调优版 - 批量处理 + 保留Step4缓存"""
+    """智能版 - 内存感知 + 动态队列"""
     
     _instance: Optional['PipelineManager'] = None
     
@@ -70,27 +74,41 @@ class PipelineManager:
             'market_processed': 0,
             'account_processed': 0,
             'errors': 0,
-            'batches_processed': 0,  # ✅ 新增：批量计数
+            'batches_processed': 0,
+            'dropped_due_to_memory': 0,  # ✅ 新增：因内存丢弃计数
             'start_time': time.time()
         }
         
         self.running = False
         self.queue = asyncio.Queue(maxsize=self.config.queue_max_size)
-        
-        # ✅ 新增：Step1临时缓存（批量处理用）
         self._step1_buffer: List[Any] = []
         
-        logger.info(f"✅ 调优版PipelineManager初始化完成 (队列: {self.config.queue_max_size}, 批量: {self.config.batch_size})")
+        logger.info(f"✅ 智能版PipelineManager初始化完成 (动态队列: {self.config.queue_max_size})")
         self._initialized = True
+    
+    def _get_memory_usage_percent(self) -> float:
+        """获取当前内存使用率"""
+        try:
+            return psutil.virtual_memory().percent
+        except:
+            return 0.0
+    
+    def _is_memory_safe(self) -> bool:
+        """检查内存是否安全"""
+        usage = self._get_memory_usage_percent()
+        return usage < self.config.memory_safe_threshold
     
     async def start(self):
         if self.running:
             return
         
-        logger.info("🚀 调优版PipelineManager启动...")
+        logger.info("🚀 智能版PipelineManager启动...")
         self.running = True
         
         asyncio.create_task(self._consumer_loop())
+        asyncio.create_task(self._cache_monitor_loop())
+        asyncio.create_task(self._memory_monitor_loop())  # ✅ 新增：内存监控
+        
         logger.info("✅ 消费者循环已启动")
     
     async def stop(self):
@@ -108,7 +126,14 @@ class PipelineManager:
         logger.info("✅ PipelineManager已停止")
     
     async def ingest_data(self, data: Dict[str, Any]) -> bool:
+        """
+        智能入队：
+        - 队列未满：直接入队
+        - 队列满了但内存安全：扩容入队（丢弃最老数据）
+        - 队列满了且内存危险：拒绝入队
+        """
         try:
+            # 1. 快速分类
             data_type = data.get("data_type", "")
             if data_type.startswith(("ticker", "funding_rate", "mark_price",
                                    "okx_", "binance_")):
@@ -124,18 +149,53 @@ class PipelineManager:
                 "timestamp": time.time()
             }
             
-            self.queue.put_nowait(queue_item)
-            return True
+            # 2. 尝试直接入队
+            try:
+                self.queue.put_nowait(queue_item)
+                return True
+            except asyncio.QueueFull:
+                pass  # 队列满了，进入智能处理
             
-        except asyncio.QueueFull:
-            logger.warning(f"⚠️ 队列已满（>{self.config.queue_max_size}），数据被拒绝")
-            return False
+            # 3. 内存检查
+            if not self._is_memory_safe():
+                logger.warning(f"⚠️ 内存危险({self._get_memory_usage_percent():.1f}%)，拒绝数据")
+                self.counters['dropped_due_to_memory'] += 1
+                return False
+            
+            # 4. 队列满但内存安全：尝试丢弃最老的数据，然后入队
+            try:
+                # 丢弃最老的一条
+                self.queue.get_nowait()
+                self.queue.put_nowait(queue_item)
+                logger.debug(f"🔄 队列满，丢弃老数据后入队: {data.get('symbol', 'N/A')}")
+                return True
+            except:
+                return False  # 还是失败
+            
         except Exception as e:
             logger.error(f"入队失败: {e}")
             return False
     
+    async def _memory_monitor_loop(self):
+        """内存监控循环（每10秒检查）"""
+        while self.running:
+            try:
+                await asyncio.sleep(10)
+                
+                mem_usage = self._get_memory_usage_percent()
+                queue_size = self.queue.qsize()
+                
+                if mem_usage > self.config.memory_safe_threshold:
+                    logger.warning(f"⚠️ 内存压力高: {mem_usage:.1f}% | 队列: {queue_size}")
+                
+                if queue_size > self.config.queue_max_size * 0.8:
+                    logger.warning(f"⚠️ 队列堆积: {queue_size}/{self.config.queue_max_size}")
+                
+            except Exception as e:
+                logger.error(f"内存监控异常: {e}")
+    
     async def _consumer_loop(self):
-        logger.info("🔄 消费者循环启动（批量处理模式）...")
+        logger.info("🔄 消费者循环启动（批量处理 + 内存感知）...")
         
         while self.running:
             try:
@@ -147,7 +207,6 @@ class PipelineManager:
                 self.queue.task_done()
                 
             except asyncio.TimeoutError:
-                # ✅ 超时后检查是否需要刷新缓冲区
                 if len(self._step1_buffer) > 0:
                     await self._flush_buffer()
                 continue
@@ -163,10 +222,8 @@ class PipelineManager:
         async with self.processing_lock:
             try:
                 if category == DataType.MARKET:
-                    # ✅ 先缓存到Step1缓冲区
                     self._step1_buffer.append(raw_data)
                     
-                    # ✅ 达到批量大小再处理
                     if len(self._step1_buffer) >= self.config.batch_size:
                         await self._flush_buffer()
                     
@@ -185,14 +242,12 @@ class PipelineManager:
         try:
             logger.debug(f"批量处理 {len(self._step1_buffer)} 条数据...")
             
-            # Step1: 批量提取
             step1_results = self.step1.process(self._step1_buffer)
-            self._step1_buffer.clear()  # ✅ 立即清空缓冲区
+            self._step1_buffer.clear()
             
             if not step1_results:
                 return
             
-            # Step2-5: 继续批量处理
             step2_results = self.step2.process(step1_results)
             if not step2_results:
                 return
@@ -209,7 +264,6 @@ class PipelineManager:
             if not final_results:
                 return
             
-            # 推送大脑
             if self.brain_callback:
                 for result in final_results:
                     await self.brain_callback(result.__dict__)
@@ -222,7 +276,6 @@ class PipelineManager:
             self.counters['errors'] += 1
     
     async def _process_account_data(self, data: Dict[str, Any]):
-        """账户数据：直连大脑"""
         if self.brain_callback:
             await self.brain_callback(data)
         
@@ -231,14 +284,17 @@ class PipelineManager:
     
     def get_status(self) -> Dict[str, Any]:
         uptime = time.time() - self.counters['start_time']
+        mem_usage = self._get_memory_usage_percent()
         return {
             "running": self.running,
             "uptime_seconds": uptime,
             "market_processed": self.counters['market_processed'],
             "account_processed": self.counters['account_processed'],
-            "batches_processed": self.counters['batches_processed'],  # ✅ 批量计数
+            "batches_processed": self.counters['batches_processed'],
             "errors": self.counters['errors'],
             "queue_size": self.queue.qsize(),
-            "buffer_size": len(self._step1_buffer),  # ✅ 缓冲区当前大小
-            "step4_cache_size": len(self.step4.binance_cache) if hasattr(self.step4, 'binance_cache') else 0
+            "buffer_size": len(self._step1_buffer),
+            "memory_usage_percent": mem_usage,
+            "dropped_due_to_memory": self.counters['dropped_due_to_memory'],
+            "memory_safe": self._is_memory_safe()
         }
