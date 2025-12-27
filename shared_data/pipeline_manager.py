@@ -1,6 +1,6 @@
 """
-PipelineManager 降压版 - 内存优化型
-功能：协调5步流水线，单条流式处理，零缓存，低内存
+PipelineManager 降压修正版 - 保留Step4缓存
+功能：单条流式处理 + 仅保留Step4必需缓存
 """
 
 import asyncio
@@ -9,13 +9,14 @@ from typing import Dict, Any, List, Optional, Callable
 from datetime import datetime
 import logging
 import time
+from dataclasses import dataclass
 
-# 5个步骤（仅导入需要的）
-from shared_data.step1_filter import Step1Filter, ExtractedData
-from shared_data.step2_fusion import Step2Fusion, FusedData
-from shared_data.step3_align import Step3Align, AlignedData
-from shared_data.step4_calc import Step4Calc, PlatformData
-from shared_data.step5_cross_calc import Step5CrossCalc, CrossPlatformData
+# 5个步骤
+from shared_data.step1_filter import Step1Filter
+from shared_data.step2_fusion import Step2Fusion
+from shared_data.step3_align import Step3Align
+from shared_data.step4_calc import Step4Calc  # 它自带缓存
+from shared_data.step5_cross_calc import Step5CrossCalc
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +25,16 @@ class DataType(Enum):
     MARKET = "market"
     ACCOUNT = "account"
 
+@dataclass
+class PipelineConfig:
+    """流水线配置（降压版）"""
+    queue_max_size: int = 500
+    processing_timeout: float = 1.0
+    log_interval: int = 60
+
 class PipelineManager:
-    """降压版管理员 - 单条流式 + 零缓存"""
+    """降压修正版 - 仅保留Step4必需缓存"""
     
-    # ✅ 新增：单例模式（内存开销<1KB）
     _instance: Optional['PipelineManager'] = None
     
     def __new__(cls, *args, **kwargs):
@@ -35,33 +42,30 @@ class PipelineManager:
             cls._instance = super().__new__(cls)
         return cls._instance
     
-    # ✅ 新增：获取单例实例
     @classmethod
     def instance(cls) -> 'PipelineManager':
-        """获取单例实例（如果未初始化则创建默认实例）"""
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
     
-    def __init__(self, brain_callback: Optional[Callable] = None):
-        # **防止重复初始化**
+    def __init__(self, brain_callback: Optional[Callable] = None, 
+                 config: Optional[PipelineConfig] = None):
+        
         if hasattr(self, '_initialized') and self._initialized:
             return
         
-        # 核心组件（轻量级）
+        self.config = config or PipelineConfig()
         self.brain_callback = brain_callback
         
-        # 5个步骤实例（无状态）
+        # 5个步骤实例
         self.step1 = Step1Filter()
         self.step2 = Step2Fusion()
         self.step3 = Step3Align()
-        self.step4 = Step4Calc()
+        self.step4 = Step4Calc()  # ✅ 保留内部缓存
         self.step5 = Step5CrossCalc()
         
-        # **单条处理锁（核心保留）**
         self.processing_lock = asyncio.Lock()
         
-        # **简单计数器（无历史记录）**
         self.counters = {
             'market_processed': 0,
             'account_processed': 0,
@@ -69,24 +73,35 @@ class PipelineManager:
             'start_time': time.time()
         }
         
-        # **状态标志**
         self.running = False
+        self.queue = asyncio.Queue(maxsize=self.config.queue_max_size)
         
-        # **数据队列（限制大小防内存爆）**
-        self.queue = asyncio.Queue(maxsize=500)
+        # ✅ 新增：Step4缓存监控（仅监控，不额外存储）
+        self.step4_cache_size = 0
         
-        logger.info("✅ 降压版PipelineManager初始化完成")
+        logger.info(f"✅ 降压修正版PipelineManager初始化完成")
         self._initialized = True
+    
+    def _update_step4_cache_monitor(self):
+        """更新Step4缓存大小监控"""
+        try:
+            self.step4_cache_size = len(self.step4.binance_cache)
+            if self.step4_cache_size > 1000:  # 警告阈值
+                logger.warning(f"⚠️ Step4缓存异常({self.step4_cache_size}个合约)")
+        except:
+            pass  # 即使监控失败也不影响主流程
     
     async def start(self):
         """启动消费者循环"""
         if self.running:
             return
         
-        logger.info("🚀 降压版PipelineManager启动...")
+        logger.info("🚀 降压修正版PipelineManager启动...")
         self.running = True
         
         asyncio.create_task(self._consumer_loop())
+        asyncio.create_task(self._cache_monitor_loop())  # ✅ 启动缓存监控
+        
         logger.info("✅ 消费者循环已启动")
     
     async def stop(self):
@@ -96,7 +111,6 @@ class PipelineManager:
         
         await asyncio.sleep(1)
         
-        # 清空队列（释放内存）
         while not self.queue.empty():
             try:
                 self.queue.get_nowait()
@@ -106,11 +120,8 @@ class PipelineManager:
         logger.info("✅ PipelineManager已停止")
     
     async def ingest_data(self, data: Dict[str, Any]) -> bool:
-        """
-        数据入口（带背压控制）
-        """
+        """数据入口（带背压控制）"""
         try:
-            # 快速分类
             data_type = data.get("data_type", "")
             if data_type.startswith(("ticker", "funding_rate", "mark_price",
                                    "okx_", "binance_")):
@@ -120,7 +131,6 @@ class PipelineManager:
             else:
                 category = DataType.MARKET
             
-            # 打包入队
             queue_item = {
                 "category": category,
                 "data": data,
@@ -131,7 +141,7 @@ class PipelineManager:
             return True
             
         except asyncio.QueueFull:
-            logger.warning(f"⚠️ 队列已满（>{self.queue.maxsize}），数据被拒绝")
+            logger.warning(f"⚠️ 队列已满（>{self.config.queue_max_size}），数据被拒绝")
             return False
         except Exception as e:
             logger.error(f"入队失败: {e}")
@@ -143,7 +153,10 @@ class PipelineManager:
         
         while self.running:
             try:
-                queue_item = await asyncio.wait_for(self.queue.get(), timeout=1.0)
+                queue_item = await asyncio.wait_for(
+                    self.queue.get(), 
+                    timeout=self.config.processing_timeout
+                )
                 await self._process_single_item(queue_item)
                 self.queue.task_done()
                 
@@ -153,6 +166,19 @@ class PipelineManager:
                 logger.error(f"循环异常: {e}")
                 self.counters['errors'] += 1
                 await asyncio.sleep(0.1)
+    
+    async def _cache_monitor_loop(self):
+        """Step4缓存监控循环（每30秒检查）"""
+        while self.running:
+            try:
+                await asyncio.sleep(30)
+                self._update_step4_cache_monitor()
+                
+                # 打印缓存状态（调试用）
+                logger.debug(f"Step4缓存: {self.step4_cache_size} 个合约")
+                
+            except Exception as e:
+                logger.error(f"缓存监控异常: {e}")
     
     async def _process_single_item(self, item: Dict[str, Any]):
         """单条数据处理"""
@@ -187,7 +213,7 @@ class PipelineManager:
         if not step3_results:
             return
         
-        # Step4: 计算
+        # Step4: 计算（内部缓存自动工作）
         step4_results = self.step4.process(step3_results)
         if not step4_results:
             return
@@ -214,7 +240,7 @@ class PipelineManager:
         logger.debug(f"💰 账户数据直达: {data.get('exchange', 'N/A')}")
     
     def get_status(self) -> Dict[str, Any]:
-        """获取当前状态"""
+        """获取当前状态（包含Step4缓存监控）"""
         uptime = time.time() - self.counters['start_time']
         return {
             "running": self.running,
@@ -222,5 +248,6 @@ class PipelineManager:
             "market_processed": self.counters['market_processed'],
             "account_processed": self.counters['account_processed'],
             "errors": self.counters['errors'],
-            "queue_size": self.queue.qsize()
+            "queue_size": self.queue.qsize(),
+            "step4_cache_size": self.step4_cache_size  # ✅ 增加缓存监控
         }
