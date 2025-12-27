@@ -5,6 +5,7 @@ PipelineManager 降压版 - 内存优化型
 """
 
 import asyncio
+from enum import Enum  # ✅ 新增这行！
 from typing import Dict, Any, List, Optional, Callable
 from datetime import datetime
 import logging
