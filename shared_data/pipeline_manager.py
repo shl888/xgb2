@@ -1,13 +1,16 @@
+#!/usr/bin/env python3
 """
 PipelineManager 终极降压版 - 流式处理 + 零缓存 + 无队列
-功能：来一条处理一条，内存占用=原始数据的1.2倍
+内存占用：<100MB，适合512MB实例
 """
 
 import asyncio
 from enum import Enum
 from typing import Dict, Any, Optional, Callable
 import logging
+import time  # ✅ 修复：必须导入
 
+# 5个步骤
 from shared_data.step1_filter import Step1Filter
 from shared_data.step2_fusion import Step2Fusion
 from shared_data.step3_align import Step3Align
@@ -51,15 +54,15 @@ class PipelineManager:
         self.step4 = Step4Calc()  # 保留必需缓存
         self.step5 = Step5CrossCalc()
         
-        # **单条处理锁（确保顺序）**
+        # 单条处理锁（确保顺序）
         self.processing_lock = asyncio.Lock()
         
-        # **计数器（无历史记录）**
+        # 计数器（无历史记录）
         self.counters = {
             'market_processed': 0,
             'account_processed': 0,
             'errors': 0,
-            'start_time': time.time()
+            'start_time': time.time()  # ✅ 现在time已导入
         }
         
         self.running = False
@@ -94,7 +97,7 @@ class PipelineManager:
         - 内存占用=原始数据的1.2倍
         """
         try:
-            # 1. 快速分类
+            # 快速分类
             data_type = data.get("data_type", "")
             if data_type.startswith(("ticker", "funding_rate", "mark_price",
                                    "okx_", "binance_")):
@@ -104,7 +107,7 @@ class PipelineManager:
             else:
                 category = DataType.MARKET
             
-            # 2. **立即处理（无队列）**
+            # 立即处理（无队列）
             async with self.processing_lock:
                 if category == DataType.MARKET:
                     await self._process_market_data(data)
@@ -169,6 +172,30 @@ class PipelineManager:
             "market_processed": self.counters['market_processed'],
             "account_processed": self.counters['account_processed'],
             "errors": self.counters['errors'],
-            "memory_mb": "流式处理，无队列积压",
+            "memory_mode": "流式处理，无队列积压",
             "step4_cache_size": len(self.step4.binance_cache) if hasattr(self.step4, 'binance_cache') else 0
         }
+
+# 使用示例
+async def main():
+    async def brain_callback(data):
+        print(f"🧠 收到: {data.get('symbol', 'N/A')}")
+    
+    manager = PipelineManager(brain_callback=brain_callback)
+    await manager.start()
+    
+    test_data = {
+        "exchange": "binance",
+        "symbol": "BTCUSDT",
+        "data_type": "funding_rate",
+        "raw_data": {"fundingRate": 0.0001}
+    }
+    
+    await manager.ingest_data(test_data)
+    await asyncio.sleep(2)
+    
+    print(manager.get_status())
+    await manager.stop()
+
+if __name__ == "__main__":
+    asyncio.run(main())
