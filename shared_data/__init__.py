@@ -5,7 +5,7 @@ shared_data 顶级模块
 
 # 核心组件（必需）
 from .data_store import data_store  # 全局数据存储实例
-from .pipeline_manager import PipelineManager, PipelineConfig, DataType  # 管理员
+from .pipeline_manager import PipelineManager, DataType  # 管理员
 
 # 5个步骤类（可选，用于单独测试或调试）
 from .step1_filter import Step1Filter, ExtractedData
